@@ -91,7 +91,7 @@ def display_frame(clip, frame, frame_len, progress):
         
 
     except IOError as e:
-        logging.info(e)
+        raise Exception(logging.info(e))
         
     except KeyboardInterrupt:    
         logging.info("ctrl + c:")
