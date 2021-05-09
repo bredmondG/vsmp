@@ -48,9 +48,8 @@ def generate_frames(clip, frame, frame_len):
     logging.info("generate_frames done")
     
 def generate_frame(clip, frame):
-    if 'out_img{}.jpg'.format(frame) not in os.listdir('yojimbo_frames'):
-        os.popen('ffmpeg -i yojimbo/{} -vf "select=gte(n\,{})" -vframes 1 yojimbo_frames/out_img{}.jpg'.format(clip,frame, frame)).read()
-        logging.info("generated_frame: {}".format(frame))
+    os.popen('ffmpeg -i yojimbo/{} -vf "select=gte(n\,{})" -vframes 1 yojimbo_frames/out_img{}.jpg'.format(clip,frame, frame)).read()
+    logging.info("generated_frame: {}".format(frame))
         
         
 def display_frame(clip, frame, frame_len, progress):
@@ -66,18 +65,17 @@ def display_frame(clip, frame, frame_len, progress):
             logging.info("section: {}".format(clip))
             logging.info("frames in section: %d" %frame_len)
             logging.info("Frame: {}".format(frame))
-            generate_frame(clip,frame)
             frame_path = 'yojimbo_frames/out_img%d.jpg' % (frame)
-            if Path(frame_path).exists():
-                im = Image.open(os.path.join('yojimbo_frames/out_img%d.jpg' % (frame)))
-                sized = im.resize((640,384), Image.ANTIALIAS)
-                epd.display(epd.getbuffer(sized))
-                os.remove(frame_path)
-                frame += 1
-                progress['frame'] = frame
-                save_data('progress.pkl', progress)
-            else:
-                logging.info("{} not in yojimbo_frames".format(frame_path))
+            # if frame_path doesn't exist or doesn't contain anything
+            if (not Path(frame_path).exists()) or (os.stat(frame_path).st_size == 0):
+                generate_frame(clip,frame)
+            im = Image.open(os.path.join('yojimbo_frames/out_img%d.jpg' % (frame)))
+            sized = im.resize((640,384), Image.ANTIALIAS)
+            epd.display(epd.getbuffer(sized))
+            os.remove(frame_path)
+            frame += 1
+            progress['frame'] = frame
+            save_data('progress.pkl', progress)
             end_t = time.time()
             lapse = end_t - start_t
             if lapse < 150:
