@@ -86,7 +86,6 @@ def display_frame(clip, frame, frame_len, progress):
                 logging.info("Time to Generate greater than 2.5 minutes")
             logging.info(time.asctime(time.localtime(time.time())))
         logging.info("finished section: {}".format(clip))
-        epd.Clear()
         
 
     except IOError as e:
@@ -115,7 +114,7 @@ def play_random_movie():
                         }
                         )
     while True:
-        i = random.randint(0, len(progress['sections'])):
+        i = random.randint(0, len(progress['sections']))
         clip = 'yojimbo_section{}.m4v'.format(i)
         frame = random.randint(0, frame_count(clip) - 5)
         frame_len = frame + 1
