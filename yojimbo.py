@@ -59,33 +59,7 @@ def display_frame(clip, frame, frame_len, progress):
         logging.info("init and Clear")
         epd.init()
         epd.Clear()
-        #time.sleep(1)
-        logging.info("Starting({}, {}): ".format(clip, frame))
-        while frame < frame_len:
-            start_t = time.time()
-            logging.info("section: {}".format(clip))
-            logging.info("frames in section: %d" %frame_len)
-            logging.info("Frame: {}".format(frame))
-            frame_path = 'yojimbo_frames/out_img%d.jpg' % (frame)
-            # if frame_path doesn't exist or doesn't contain anything
-            if (not Path(frame_path).exists()) or (os.stat(frame_path).st_size == 0):
-                generate_frame(clip,frame)
-            im = Image.open(os.path.join('yojimbo_frames/out_img%d.jpg' % (frame)))
-            sized = im.resize((640,384), Image.ANTIALIAS)
-            epd.display(epd.getbuffer(sized))
-            os.remove(frame_path)
-            frame += 1
-            progress['frame'] = frame
-            save_data('progress.pkl', progress)
-            end_t = time.time()
-            lapse = end_t - start_t
-            if lapse < 150:
-                logging.info("Time to generate: {}s".format(round(lapse, 2)))
-                time.sleep(150 - lapse)
-            else:
-                logging.info("Time to Generate greater than 2.5 minutes")
-            logging.info(time.asctime(time.localtime(time.time())))
-        logging.info("finished section: {}".format(clip))
+
         
 
     except IOError as e:
@@ -95,6 +69,34 @@ def display_frame(clip, frame, frame_len, progress):
         logging.info("ctrl + c:")
         epd7in5bc.epdconfig.module_exit()
         exit()
+
+
+def display_frame(clip, frame, frame_len, progress, epd):
+    while frame < frame_len:
+        start_t = time.time()
+        logging.info("section: {}".format(clip))
+        logging.info("frames in section: %d" %frame_len)
+        logging.info("Frame: {}".format(frame))
+        frame_path = 'yojimbo_frames/out_img%d.jpg' % (frame)
+        # if frame_path doesn't exist or doesn't contain anything
+        if (not Path(frame_path).exists()) or (os.stat(frame_path).st_size == 0):
+            generate_frame(clip,frame)
+        im = Image.open(os.path.join('yojimbo_frames/out_img%d.jpg' % (frame)))
+        sized = im.resize((640,384), Image.ANTIALIAS)
+        epd.display(epd.getbuffer(sized))
+        os.remove(frame_path)
+        frame += 1
+        progress['frame'] = frame
+        save_data('progress.pkl', progress)
+        end_t = time.time()
+        lapse = end_t - start_t
+        if lapse < 150:
+            logging.info("Time to generate: {}s".format(round(lapse, 2)))
+            time.sleep(150 - lapse)
+        else:
+            logging.info("Time to Generate greater than 2.5 minutes")
+        logging.info(time.asctime(time.localtime(time.time())))
+    logging.info("finished section: {}".format(clip))
 
 def save_data(file, data):
     with open(file, 'wb') as f:
@@ -119,9 +121,9 @@ def play_random_movie():
         frame = random.randint(0, frame_count(clip) - 5)
         frame_len = frame + 1
         logging.info("Section: {}".format(clip))
-        display_frame(clip, frame, frame_len, progress)
+        display_frame(clip, frame, frame_len, progress,epd)
 
-def play_movie():
+def play_movie(epd):
     progress = load_data('progress.pkl', {
                             'sections' : os.listdir('yojimbo'),
                             'sections_ran': [],
@@ -135,7 +137,7 @@ def play_movie():
             frame = progress['frame']
             frame_len = frame_count(clip)- 5
             logging.info("Section: {}".format(clip))
-            display_frame(clip, frame, frame_len, progress)
+            display_frame(clip, frame, frame_len, progress, epd)
             progress['sections_ran'].append(clip)
             progress['frame'] = 0
             save_data('progress.pkl', progress)
@@ -143,7 +145,22 @@ def play_movie():
             logging.info("Already Ran: {}".format(clip))
     logging.info("movie finished")
     epd.sleep()
+
 if __name__ == '__main__':
-    play_random_movie()
+    try:        
+        epd = epd7in5.EPD()
+        logging.info("init and Clear")
+        epd.init()
+        epd.Clear()
+        play_random_movie(epd)
+
+        
+    except IOError as e:
+        raise Exception(logging.info(e))
+        
+    except KeyboardInterrupt:    
+        logging.info("ctrl + c:")
+        epd7in5bc.epdconfig.module_exit()
+        exit()
 
 
