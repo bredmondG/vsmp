@@ -12,6 +12,7 @@ import traceback
 import pickle
 from pathlib import Path
 import subprocess
+import random
         
 logging.basicConfig(filename='log.txt', filemode='w', level=logging.DEBUG)
 logging.warning('hello log')
@@ -106,10 +107,25 @@ def load_data(file, data):
             return pickle.load(f)
     return data
 
+def play_random_movie():
+    progress = load_data('progress.pkl', {
+                        'sections' : os.listdir('yojimbo'),
+                        'sections_ran': [],
+                        'frame' : 0
+                        }
+                        )
+    while True:
+        i = random.randint(0, len(progress['sections'])):
+        clip = 'yojimbo_section{}.m4v'.format(i)
+        frame = random.randint(0, frame_count(clip) - 5)
+        frame_len = frame + 1
+        logging.info("Section: {}".format(clip))
+        display_frame(clip, frame, frame_len, progress)
+
 def play_movie():
     progress = load_data('progress.pkl', {
                             'sections' : os.listdir('yojimbo'),
-                            'sections_ran': ['yojimbo_section0.m4v','yojimbo_section1.m4v','yojimbo_section2.m4v'],
+                            'sections_ran': [],
                             'frame' : 0
                             }
                          )
@@ -129,6 +145,6 @@ def play_movie():
     logging.info("movie finished")
     epd.sleep()
 if __name__ == '__main__':
-    play_movie()
+    play_random_movie()
 
 
