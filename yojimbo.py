@@ -108,7 +108,7 @@ def load_data(file, data):
             return pickle.load(f)
     return data
 
-def play_random_movie():
+def play_random_movie(epd):
     progress = load_data('progress.pkl', {
                         'sections' : os.listdir('yojimbo'),
                         'sections_ran': [],
@@ -116,7 +116,7 @@ def play_random_movie():
                         }
                         )
     while True:
-        i = random.randint(0, len(progress['sections']))
+        i = random.randint(0, len(progress['sections'])-1)
         clip = 'yojimbo_section{}.m4v'.format(i)
         frame = random.randint(0, frame_count(clip) - 5)
         frame_len = frame + 1
