@@ -11,7 +11,7 @@ def display_logs():
 @app.route('/')
 def home():
     frame = "current_frame.jpg"
-    return render_template('logs.html', logs = display_logs(), image_filename=frame)
+    return render_template('i_logs.html', log_lines = display_logs(), image_filename=frame)
 
 @app.route('/frame')
 def display_frame():

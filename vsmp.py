@@ -6,6 +6,7 @@ import ffmpeg
 import logging
 import epd7in5_V2
 import epd7in5bc
+import shutil
 import time
 from threading import Thread
 from PIL import Image,ImageDraw,ImageFont
@@ -91,6 +92,7 @@ def display_frame(clip, frame, frame_len, progress, epd, movie_name):
         im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame)))
         sized = im.resize((800,480), Image.ANTIALIAS)
         epd.display(epd.getbuffer(sized))
+        shutil.copy(frame_path, "server/static/current_frame.jpg")
         os.remove(frame_path)
         frame += 1
         progress['frame'] = frame

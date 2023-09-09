@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Image and Log Viewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background-color: #f2f2f2;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.2);
+        }
+        .log {
+            background-color: #e8e8e8;
+            padding: 10px;
+            margin-top: 20px;
+            border-radius: 5px;
+        }
+        .image-container {
+            margin-top: 20px;
+        }
+        img {
+            max-width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Image and Log Viewer</h1>
+        
+        <div class="log">
+            <h2>Log Lines</h2>
+            <ul>
+                {% for log_line in log_lines %}
+                    <li>{{ log_line }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        
+        <div class="image-container">
+            <h2>Image</h2>
+            <img src="{{ url_for('static', filename=image_filename) }}" alt="Image">
+        </div>
+    </div>
+</body>
+</html>
