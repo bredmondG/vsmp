@@ -55,7 +55,7 @@ def generate_frames(clip, frame, frame_len, movie_name):
     
 def generate_frame(clip, frame, movie_name):
     folder = '{}_frames'.format(movie_name)
-    os.popen('ffmpeg -i {}/{} -vf "select=gte(n\,{})" -vframes 1 {}/out_img{}.jpg'.format(movie_name, clip,frame, folder, frame)).read()
+    os.popen('ffmpeg -probesize 100M -analyzeduration 100M -i {}/{} -vf "select=gte(n\,{})" -vframes 1 {}/out_img{}.jpg'.format(movie_name, clip,frame, folder, frame)).read()
     logging.info("generated_frame: {}".format(frame))
         
         
@@ -164,7 +164,7 @@ if __name__ == '__main__':
         logging.info("init and Clear")
         epd.init()
         epd.Clear()
-        play_movie(epd, "2001.mp4")
+        play_movie(epd, "brazil.mp4")
 
         
     except IOError as e:
