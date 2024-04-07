@@ -4,8 +4,8 @@ import sys
 import os
 import ffmpeg
 import logging
-import epd7in5_V2
-import epd7in5bc
+from epd import epd7in5_V2
+from epd import epd7in5bc
 import time
 from threading import Thread
 from PIL import Image,ImageDraw,ImageFont
@@ -23,6 +23,7 @@ def slice_video(filename, start_range = 0):
     stop_range = start_range + 20
     movie_name = filename.split(".")[0]
     file_type = "." + filename.split(".")[1]
+    os.mkdir(movie_name)
     s = os.popen('ffprobe -v error -select_streams v:0 -show_entries stream=duration -of default=noprint_wrappers=1:nokey=1 {}'.format(filename))
     seconds = float(s.read().split()[0])
     duration = seconds/20
