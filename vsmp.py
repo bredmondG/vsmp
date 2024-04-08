@@ -1,5 +1,6 @@
 #!/usr/bin/python
 # -*- coding:utf-8 -*-
+import argparse
 import sys
 import os
 import ffmpeg
@@ -90,7 +91,7 @@ def display_frame(clip, frame, frame_len, progress, epd, movie_name):
         if (not Path(frame_path).exists()) or (os.stat(frame_path).st_size == 0):
             generate_frame(clip,frame, movie_name)
         im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame)))
-        sized = im.resize((800,480), Image.ANTIALIAS)
+        sized = im.resize((800,480), Image.LANCZOS)
         epd.display(epd.getbuffer(sized))
         os.remove(frame_path)
         frame += 1
@@ -118,6 +119,7 @@ def load_data(file, data):
 
 def play_random_movie(epd, filename):
     movie_name = filename.split(".")[0]
+    os.makedirs(f"{movie_name}_frames", exist_ok=True)
     file_type = "." + filename.split(".")[1]
     folder = '{}_frames'.format(movie_name)
     progress = load_data('progress.pkl', {
@@ -136,6 +138,7 @@ def play_random_movie(epd, filename):
 
 def play_movie(epd, filename):
     movie_name = filename.split(".")[0]
+    os.makedirs(f"{movie_name}_frames", exist_ok=True)
     file_type = "." + filename.split(".")[1]
     progress = load_data('progress.pkl', {
                             'sections' : os.listdir(movie_name),
@@ -160,12 +163,16 @@ def play_movie(epd, filename):
     epd.sleep()
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("filename", help="the name of the movie file with .mp4")
+    args = parser.parse_args()
+    filename = args.filename
     try:        
         epd = epd7in5_V2.EPD()
         logging.info("init and Clear")
         epd.init()
         epd.Clear()
-        play_movie(epd, "brazil.mp4")
+        play_movie(epd, filename)
 
         
     except IOError as e:
