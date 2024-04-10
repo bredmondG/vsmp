@@ -9,7 +9,7 @@ from epd import epd7in5_V2
 from epd import epd7in5bc
 import time
 from threading import Thread
-from PIL import Image,ImageDraw,ImageFont
+from PIL import Image,ImageDraw,ImageFont,ImageEnhance
 import traceback
 import pickle
 from pathlib import Path
@@ -61,22 +61,22 @@ def generate_frame(clip, frame, movie_name):
     logging.info("generated_frame: {}".format(frame))
         
         
-def display_frame(clip, frame, frame_len, progress):
-    try:        
-        epd = epd7in5_V2.EPD()
-        logging.info("init and Clear")
-        epd.init()
-        epd.Clear()
+# def display_frame(clip, frame, frame_len, progress):
+#     try:        
+#         epd = epd7in5_V2.EPD()
+#         logging.info("init and Clear")
+#         epd.init()
+#         epd.Clear()
 
         
 
-    except IOError as e:
-        raise Exception(logging.info(e))
+#     except IOError as e:
+#         raise Exception(logging.info(e))
         
-    except KeyboardInterrupt:    
-        logging.info("ctrl + c:")
-        epd7in5_V2.epdconfig.module_exit()
-        exit()
+#     except KeyboardInterrupt:    
+#         logging.info("ctrl + c:")
+#         epd7in5_V2.epdconfig.module_exit()
+#         exit()
 
 
 def display_frame(clip, frame, frame_len, progress, epd, movie_name):
@@ -91,7 +91,12 @@ def display_frame(clip, frame, frame_len, progress, epd, movie_name):
         if (not Path(frame_path).exists()) or (os.stat(frame_path).st_size == 0):
             generate_frame(clip,frame, movie_name)
         im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame)))
-        sized = im.resize((800,480), Image.LANCZOS)
+        enhance = ImageEnhance.Contrast(im)
+        enhanced_im = enhance.enhance(2.0)
+        converted_im = enhanced_im.convert('P')
+        # This setting seemed to work better with metropolis
+        # converted_im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame))).convert('P')
+        sized = converted_im.resize((800,480))
         epd.display(epd.getbuffer(sized))
         os.remove(frame_path)
         frame += 1
