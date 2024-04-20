@@ -92,7 +92,7 @@ def display_frame(clip, frame, frame_len, progress, epd, movie_name):
             generate_frame(clip,frame, movie_name)
         im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame)))
         enhance = ImageEnhance.Contrast(im)
-        enhanced_im = enhance.enhance(2.0)
+        enhanced_im = enhance.enhance(10)
         converted_im = enhanced_im.convert('P')
         # This setting seemed to work better with metropolis
         # converted_im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame))).convert('P')
