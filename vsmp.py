@@ -5,7 +5,7 @@ import sys
 import os
 import ffmpeg
 import logging
-from epd import epd7in5_V2
+from epd import epd7in5_V2_old
 from epd import epd7in5bc
 import time
 from threading import Thread
@@ -78,6 +78,18 @@ def generate_frame(clip, frame, movie_name):
 #         epd7in5_V2.epdconfig.module_exit()
 #         exit()
 
+def convert_image(im: Image, enhance = True):
+    logging.info(f"Converting Image: {enhance}")
+    if enhance:
+        enhance = ImageEnhance.Contrast(im)
+        enhanced_im = enhance.enhance(1)
+        converted_image = enhanced_im.convert('P')
+    else:
+        converted_image = im
+
+    return converted_image
+
+
 
 def display_frame(clip, frame, frame_len, progress, epd, movie_name):
     folder = '{}_frames'.format(movie_name)
@@ -91,9 +103,15 @@ def display_frame(clip, frame, frame_len, progress, epd, movie_name):
         if (not Path(frame_path).exists()) or (os.stat(frame_path).st_size == 0):
             generate_frame(clip,frame, movie_name)
         im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame)))
-        enhance = ImageEnhance.Contrast(im)
-        enhanced_im = enhance.enhance(10)
-        converted_im = enhanced_im.convert('P')
+
+        # alternate between converted and non converted image. 
+        # This is to give some variety
+        converted_im = convert_image(im, enhance=False)
+        # if frame % 2 == 0:
+        #     converted_im = convert_image(im)
+        # else:
+        #     converted_im = convert_image(im, enhance=False)
+        
         # This setting seemed to work better with metropolis
         # converted_im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame))).convert('P')
         sized = converted_im.resize((800,480))
@@ -173,11 +191,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
     filename = args.filename
     try:        
-        epd = epd7in5_V2.EPD()
+        epd = epd7in5_V2_old.EPD()
         logging.info("init and Clear")
         epd.init()
         epd.Clear()
         play_movie(epd, filename)
+        logging.info("Finished!")
 
         
     except IOError as e:
@@ -185,7 +204,7 @@ if __name__ == '__main__':
         
     except KeyboardInterrupt:    
         logging.info("ctrl + c:")
-        epd7in5_V2.epdconfig.module_exit()
+        epd7in5_V2_old.epdconfig.module_exit()
         exit()
 
 
