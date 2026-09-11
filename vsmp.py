@@ -13,6 +13,7 @@ from threading import Thread
 from PIL import Image,ImageDraw,ImageFont,ImageEnhance
 import pickle
 from pathlib import Path
+import socket
 import subprocess
 import random
         
@@ -60,6 +61,127 @@ configure_logging()
 # so mark it explicitly now that previous runs are no longer overwritten.
 logging.info('=== vsmp starting ===')
 
+# --- systemd watchdog --------------------------------------------------------
+#
+# Why this exists (recommendation 3). Two protections are already in place and
+# neither covers the remaining case:
+#
+#   * The BUSY timeout in the display driver bounds hangs inside ReadBusy().
+#   * The systemd unit restarts the player whenever it exits.
+#
+# What is left is a stall somewhere else. generate_frame() runs ffmpeg through
+# os.popen(...).read(), which has no timeout, so a wedged ffmpeg leaves a
+# perfectly healthy-looking process that never displays another frame. Nothing
+# crashes and nothing exits, so a restart-on-exit supervisor never triggers.
+#
+# systemd's WatchdogSec= handles exactly this: it expects a WATCHDOG=1 datagram
+# at least every WATCHDOG_USEC/2, and kills and restarts the service if the
+# messages stop arriving.
+#
+# This talks to the notify socket directly rather than depending on the
+# python3-systemd package, which would be a new dependency for about thirty
+# lines of work.
+
+_watchdog_sock = None
+_watchdog_addr = None
+_watchdog_interval_s = None
+
+
+def configure_watchdog():
+    """Set up the systemd watchdog, if we are running under systemd.
+
+    A no-op when NOTIFY_SOCKET or WATCHDOG_USEC are absent, which is the case
+    when vsmp.py is started by hand. Manual runs therefore behave exactly as
+    they did before.
+    """
+    global _watchdog_sock, _watchdog_addr, _watchdog_interval_s
+
+    addr = os.environ.get('NOTIFY_SOCKET')
+    usec = os.environ.get('WATCHDOG_USEC')
+    if not addr or not usec:
+        logging.info("systemd watchdog not active "
+                     "(NOTIFY_SOCKET/WATCHDOG_USEC not set), continuing without it")
+        return
+
+    # A leading '@' means the Linux abstract socket namespace, which Python
+    # expresses as a leading NUL byte. Only the first character is replaced.
+    if addr.startswith('@'):
+        addr = '\0' + addr[1:]
+
+    try:
+        watchdog_s = int(usec) / 1_000_000
+        _watchdog_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        _watchdog_addr = addr
+        # systemd requires a ping at least every half interval. Use a third to
+        # leave headroom for a slow frame without tripping the watchdog.
+        _watchdog_interval_s = watchdog_s / 3
+    except (OSError, ValueError):
+        logging.exception("Could not set up the systemd watchdog, continuing without it")
+        _watchdog_sock = None
+        return
+
+    logging.info("systemd watchdog active: WatchdogSec=%.0fs, pinging every %.0fs",
+                 watchdog_s, _watchdog_interval_s)
+
+
+def watchdog_ping():
+    """Tell systemd the player is still alive.
+
+    Only call this where the player has actually made progress, or where it is
+    legitimately idle between frames.
+
+    Deliberately NOT driven from a background timer thread. A thread pinging on
+    a schedule would keep reporting healthy while the frame loop sat wedged in
+    ffmpeg, which is precisely the failure this is supposed to catch. Tying the
+    ping to real progress is the whole point.
+    """
+    global _watchdog_sock
+
+    if _watchdog_sock is None:
+        return
+    try:
+        _watchdog_sock.sendto(b'WATCHDOG=1', _watchdog_addr)
+    except OSError:
+        # Stop trying rather than logging this every frame. Letting the pings
+        # lapse is the right outcome anyway: systemd will notice and restart
+        # us, which is what we would want if the notify socket has gone.
+        logging.exception("Watchdog ping failed, disabling pings. "
+                          "systemd will restart the service when WatchdogSec expires.")
+        _watchdog_sock = None
+
+
+def sleep_between_frames(seconds):
+    """Wait out the gap to the next frame, pinging the watchdog as we go.
+
+    Split into chunks instead of one long sleep. If the ping only happened once
+    per frame, WatchdogSec would have to be longer than the entire frame
+    interval plus the slowest possible extraction, which makes the detection
+    window needlessly coarse and ties it to the frame rate. Pinging through the
+    idle period means WatchdogSec only has to cover extract-and-display.
+
+    The process is genuinely healthy while waiting here, so pinging is honest:
+    a hang shows up as extraction never finishing, which stops the pings.
+
+    Note for recommendation 24: when the schedule moves to absolute deadlines,
+    keep the chunked sleep and the ping inside it.
+    """
+    if seconds <= 0:
+        return
+
+    # Without a watchdog, fall back to a single sleep so manual runs are
+    # unchanged.
+    chunk = _watchdog_interval_s or seconds
+
+    # monotonic() so an NTP step mid-sleep cannot stretch or collapse the wait.
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(chunk, remaining))
+        watchdog_ping()
+
+
 def slice_video(filename, start_range = 0):
     #cuts file into 20 equal sections
     stop_range = start_range + 20
@@ -72,7 +194,10 @@ def slice_video(filename, start_range = 0):
     t = 0
     for i in range(start_range, stop_range):
         print(t, t + duration)
-        command = 'ffmpeg -i {} -ss {} -t {} -c copy {}/{}_section{}{}'.format(filename, t, duration, movie_name, movie_name, i, file_type)
+        # -y -nostdin for the same reason as generate_frame: never block on an
+        # overwrite prompt with nobody there to answer it. Re-slicing a movie
+        # now replaces existing sections rather than stopping partway.
+        command = 'ffmpeg -y -nostdin -i {} -ss {} -t {} -c copy {}/{}_section{}{}'.format(filename, t, duration, movie_name, movie_name, i, file_type)
         output = os.popen(command)
         print(output.read())
         t+= duration
@@ -91,14 +216,36 @@ def generate_frames(clip, frame, frame_len, movie_name):
     while frame < frame_len:
         if len(os.listdir(folder)) < 3000:
             if ('out_img%d.jpg' %(frame)) not in os.listdir(folder):
-                os.system('ffmpeg -i {}/{} -vf "select=gte(n\,{})" -vframes 1 {}/out_img{}.jpg'.format(movie_name, clip, frame, folder, frame))
+                # -y -nostdin as in generate_frame. This function is currently
+                # unreachable (see recommendation 33) but is fixed too so it
+                # cannot reintroduce the stall if anyone wires it back up.
+                os.system('ffmpeg -y -nostdin -i {}/{} -vf "select=gte(n\,{})" -vframes 1 {}/out_img{}.jpg'.format(movie_name, clip, frame, folder, frame))
             frame +=1
 
     logging.info("generate_frames done")
     
 def generate_frame(clip, frame, movie_name):
     folder = '{}_frames'.format(movie_name)
-    os.popen('ffmpeg -probesize 100M -analyzeduration 100M -i {}/{} -vf "select=gte(n\,{})" -vframes 1 {}/out_img{}.jpg'.format(movie_name, clip,frame, folder, frame)).read()
+    # -y and -nostdin are load-bearing. Without them this call can stop the
+    # player dead, and it is reachable in normal operation.
+    #
+    # display_frame only calls this when the frame file is missing OR is zero
+    # bytes. A zero-byte out_imgN.jpg is exactly what a killed or interrupted
+    # ffmpeg leaves behind, so the file already exists when we get here. ffmpeg
+    # then refuses to clobber it, and what happens next depends on the build:
+    #
+    #   older ffmpeg (Raspberry Pi OS ships 4.x/5.x)
+    #       prints "File '...' already exists. Overwrite? [y/N]" and reads stdin.
+    #       Nobody is there to answer, so os.popen(...).read() below never
+    #       returns and the player stalls forever with no error.
+    #   newer ffmpeg
+    #       gives up without writing the file, and the Image.open() in
+    #       display_frame then fails on a zero-byte JPEG.
+    #
+    # Either way the run is over, and it repeats on every restart because the
+    # zero-byte file is still sitting there. -y answers the question up front;
+    # -nostdin stops ffmpeg waiting on stdin under any circumstances.
+    os.popen('ffmpeg -y -nostdin -probesize 100M -analyzeduration 100M -i {}/{} -vf "select=gte(n\,{})" -vframes 1 {}/out_img{}.jpg'.format(movie_name, clip,frame, folder, frame)).read()
     logging.info("generated_frame: {}".format(frame))
         
         
@@ -162,11 +309,17 @@ def display_frame(clip, frame, frame_len, progress, epd, movie_name):
         frame += 1
         progress['frame'] = frame
         save_data('progress.pkl', progress)
+
+        # A frame has been displayed and the new position is safely on disk.
+        # This is the one point in the loop where forward progress is proven, so
+        # it is the right place to tell the watchdog we are alive.
+        watchdog_ping()
+
         end_t = time.time()
         lapse = end_t - start_t
         if lapse < 150:
             logging.info("Time to generate: {}s".format(round(lapse, 2)))
-            time.sleep(150 - lapse)
+            sleep_between_frames(150 - lapse)
         else:
             logging.info("Time to Generate greater than 2.5 minutes")
         logging.info(time.asctime(time.localtime(time.time())))
@@ -313,6 +466,8 @@ if __name__ == '__main__':
     parser.add_argument("filename", help="the name of the movie file with .mp4")
     args = parser.parse_args()
     filename = args.filename
+    configure_watchdog()
+
     try:
         epd = epd7in5_V2_old.EPD()
         logging.info("init and Clear")

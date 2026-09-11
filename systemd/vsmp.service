@@ -1,0 +1,147 @@
+# Very Slow Movie Player -- systemd service unit
+#
+# Replaces:  nohup python3 vsmp.py filename > /dev/null 2>&1 &
+#
+# Why bother: nohup does not survive a reboot, and nothing restarts the player
+# when it exits. Since the BUSY-wait timeout was added to the display driver, a
+# stuck panel now exits non-zero instead of hanging silently -- but nothing is
+# watching for that exit. This unit is the thing that watches.
+# See recommendation 1 in RECOMMENDATIONS.md.
+#
+# ---------------------------------------------------------------------------
+# Install (edit the PATHS block below first)
+#
+#   sudo cp systemd/vsmp.service /etc/systemd/system/vsmp.service
+#   sudo cp systemd/vsmp.env.example /etc/default/vsmp
+#   sudo nano /etc/default/vsmp          # set VSMP_MOVIE
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vsmp
+#
+# Operate
+#
+#   systemctl status vsmp                # is it running, and why did it stop
+#   journalctl -u vsmp -f                # live output
+#   journalctl -u vsmp --since '1 hour ago'
+#   sudo systemctl restart vsmp
+#   sudo systemctl stop vsmp             # stays stopped, no auto-restart
+#
+# After editing this file, always run: sudo systemctl daemon-reload
+# ---------------------------------------------------------------------------
+
+[Unit]
+Description=Very Slow Movie Player (Waveshare 7.5in e-paper)
+# Wait for a normal boot to finish before starting. Nothing here uses the
+# network; the point is to avoid racing SPI and GPIO device setup.
+After=multi-user.target
+
+# Restart rate limiting.
+#
+# These belong in [Unit], not [Service] -- they moved sections in systemd 229
+# and are silently ignored if placed in [Service] on current versions.
+#
+# They bound a specific known case. When a movie finishes, play_movie() returns
+# and the process exits 0. Restart=always restarts it; the new process finds
+# every section already listed in progress.pkl under 'sections_ran', logs
+# "Already Ran" for each, and exits 0 again. Without a limit that is a
+# 10-second loop forever. With it, systemd gives up after 5 attempts and the
+# unit enters the failed state, which is visible in `systemctl status`.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# ---- PATHS: adjust these three for your machine ---------------------------
+# Assumed layout, with the virtualenv as a sibling of the repo:
+#
+#   /home/pi/
+#   |-- venv/          <- virtualenv with requirements.txt installed
+#   `-- vsmp/          <- this repo, contains vsmp.py
+#
+# There is no need to "activate" the venv. Invoking its interpreter directly is
+# equivalent and is the correct approach under systemd, which has no shell to
+# run an activate script in.
+User=pi
+WorkingDirectory=/home/pi/vsmp
+ExecStart=/home/pi/venv/bin/python vsmp.py ${VSMP_MOVIE}
+# ---------------------------------------------------------------------------
+
+# WorkingDirectory above is load-bearing, not cosmetic. log.txt, progress.pkl,
+# the pre-sliced movie directory and the <movie>_frames directory are all
+# resolved relative to the current directory, so the player only finds its own
+# state if it starts here.
+
+# The movie filename lives in a separate file so changing films does not mean
+# editing a unit and remembering daemon-reload. Required, not optional (no
+# leading dash): if it is missing, better to fail loudly at start than to run
+# with an empty filename.
+EnvironmentFile=/etc/default/vsmp
+
+# Python buffers stdout when it is not a terminal, which would delay or lose
+# output into the journal. Tracebacks reach the journal via stderr; this makes
+# ordinary prints timely too.
+Environment=PYTHONUNBUFFERED=1
+
+# Restart on both crashes and clean exits. `always` rather than `on-failure`
+# because a clean-but-unexpected exit is still a stopped movie, and the
+# StartLimit settings above stop that becoming a busy loop.
+Restart=always
+RestartSec=10
+
+# ---- Liveness watchdog ----------------------------------------------------
+# Restarting on exit is not enough on its own. generate_frame() runs ffmpeg via
+# os.popen(...).read(), which has no timeout, so a wedged ffmpeg leaves a live
+# process that never shows another frame. Nothing crashes, nothing exits, and
+# nothing above would notice.
+#
+# With WatchdogSec set, systemd passes WATCHDOG_USEC to the process and expects
+# a WATCHDOG=1 message at least every half of that. vsmp.py sends one after each
+# frame is displayed and its position saved, and again periodically while
+# waiting out the gap to the next frame. If the frame loop stalls, the messages
+# stop and systemd restarts the service.
+#
+# Choosing the value: it must comfortably exceed the slowest legitimate
+# extract-and-display cycle, or healthy playback will be restarted repeatedly
+# and never progress. Extraction cost currently grows with position within a
+# section, because generate_frame uses ffmpeg's select=gte() filter, and it has
+# never been measured on this Pi. 600s is therefore deliberately generous. If
+# you see the journal reporting watchdog timeouts during otherwise healthy
+# playback, RAISE this value rather than removing it, and look at
+# recommendation 21 to make extraction cost predictable.
+#
+# NotifyAccess is implicitly set to main when WatchdogSec is used, but it is
+# stated here so the mechanism is obvious to anyone reading the unit. Type is
+# left as simple: Type=notify would additionally require a READY=1 message at
+# startup, which the player does not send.
+WatchdogSec=600
+NotifyAccess=main
+
+# On watchdog timeout systemd sends SIGABRT (the default) rather than the SIGINT
+# used for a deliberate stop. That is intentional: a process that has tripped
+# the watchdog is by definition stuck, so waiting for a graceful handler to run
+# is unwise. The panel is reinitialised by init() on the next start anyway.
+# ---------------------------------------------------------------------------
+
+# Stop the player with SIGINT rather than the default SIGTERM.
+#
+# This is deliberate and matters for the hardware. Python turns SIGINT into
+# KeyboardInterrupt, which vsmp.py already handles: it logs the shutdown, calls
+# release_display() to close SPI and power the panel down, and exits 0. A plain
+# SIGTERM has no handler, so the process would die instantly and leave the
+# panel's 5V rail powered -- potentially for days between a stop and the next
+# manual start.
+#
+# TimeoutStopSec is the backstop: if the interrupt lands while blocked in an
+# ffmpeg call and the process does not exit within 30s, systemd sends SIGKILL.
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# vsmp.py keeps its own rotating log.txt. Sending stdout and stderr to the
+# journal as well gives a second, independent record with reboot boundaries in
+# it -- useful precisely when log.txt is the thing that went missing.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vsmp
+
+[Install]
+WantedBy=multi-user.target
