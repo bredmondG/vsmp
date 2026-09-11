@@ -115,7 +115,8 @@ def display_frame(clip, frame, frame_len, progress, epd, movie_name):
         # This setting seemed to work better with metropolis
         # converted_im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame))).convert('P')
         sized = converted_im.resize((800,480))
-        epd.display(epd.getbuffer(sized))
+        logging.info(f"Displaying image: {frame_path}")
+        display_on_e_ink(epd, sized)
         os.remove(frame_path)
         frame += 1
         progress['frame'] = frame
@@ -129,6 +130,12 @@ def display_frame(clip, frame, frame_len, progress, epd, movie_name):
             logging.info("Time to Generate greater than 2.5 minutes")
         logging.info(time.asctime(time.localtime(time.time())))
     logging.info("finished section: {}".format(clip))
+
+def display_on_e_ink(epd, image_to_display):
+    epd.init()
+    epd.Clear()
+    epd.display(epd.getbuffer(image_to_display))
+    epd.sleep()
 
 def save_data(file, data):
     with open(file, 'wb') as f:
