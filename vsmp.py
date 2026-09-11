@@ -5,19 +5,60 @@ import sys
 import os
 import ffmpeg
 import logging
+from logging.handlers import RotatingFileHandler
 from epd import epd7in5_V2_old
 from epd import epd7in5bc
 import time
 from threading import Thread
 from PIL import Image,ImageDraw,ImageFont,ImageEnhance
-import traceback
 import pickle
 from pathlib import Path
 import subprocess
 import random
         
-logging.basicConfig(filename='log.txt', filemode='w', level=logging.DEBUG)
-logging.warning('hello log')
+LOG_FILE = 'log.txt'
+LOG_MAX_BYTES = 5 * 1024 * 1024   # rotate once a log file reaches 5 MB
+LOG_BACKUP_COUNT = 5              # keep log.txt plus log.txt.1 ... log.txt.5
+
+
+def configure_logging():
+    """Set up file logging that survives a restart.
+
+    This player is expected to run unattended for weeks, and the interesting
+    question after a stall is always "what did it say just before it stopped?".
+
+    The previous setup was:
+
+        logging.basicConfig(filename='log.txt', filemode='w', ...)
+
+    ``filemode='w'`` truncates the file every time the process starts, so a
+    crash-and-restart (or an SSH-in-and-restart) wiped the only record of the
+    failure. Appending instead means the evidence outlives the process.
+
+    Appending forever would eventually fill the SD card, so a RotatingFileHandler
+    caps total log size at LOG_MAX_BYTES * (LOG_BACKUP_COUNT + 1).
+    """
+    handler = RotatingFileHandler(
+        LOG_FILE,
+        mode='a',                      # append: never destroy previous runs
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+    )
+    # Timestamp every line. Without this, correlating a stall against
+    # `dmesg` / `journalctl` output is guesswork.
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)-8s %(name)s: %(message)s'
+    ))
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    root.addHandler(handler)
+
+
+configure_logging()
+# A restart is the single most useful thing to be able to find in the log,
+# so mark it explicitly now that previous runs are no longer overwritten.
+logging.info('=== vsmp starting ===')
 
 def slice_video(filename, start_range = 0):
     #cuts file into 20 equal sections
@@ -137,9 +178,84 @@ def display_on_e_ink(epd, image_to_display):
     epd.display(epd.getbuffer(image_to_display))
     epd.sleep()
 
+def release_display():
+    """Power the panel down and close the SPI bus.
+
+    Call this on every abnormal exit path. If we die still holding SPI and with
+    the panel's 5V rail on, the next process to start (a supervisor restarting
+    us, or a human over SSH) may fail to initialise the display, turning a
+    one-off error into a stuck player.
+
+    Note this is called with no arguments deliberately: only the RaspberryPi
+    implementation in epdconfig.py accepts `cleanup`, the other platform
+    implementations take none. The kernel reclaims the GPIO pins when the
+    process exits anyway, so the useful part here is the power-down.
+
+    Failures are logged and swallowed. This runs while we are already handling
+    an error, and a cleanup failure must not mask the original problem.
+    """
+    try:
+        epd7in5_V2_old.epdconfig.module_exit()
+        logging.info("Display released (SPI closed, panel powered down)")
+    except Exception:
+        logging.exception("Could not release the display cleanly, continuing to exit")
+
 def save_data(file, data):
-    with open(file, 'wb') as f:
-        pickle.dump(data, f)
+    """Pickle `data` to `file` atomically, so a power cut cannot corrupt it.
+
+    This is called after every single frame, which means it runs roughly 576
+    times a day for months. Previously it opened the real file with mode 'wb'
+    and pickled straight into it. That truncates the file to zero bytes first,
+    so the player spent a small slice of every frame with progress.pkl in a
+    half-written state. Losing power in that window left a truncated file, and
+    load_data() then raised on the next start -- the run was over until someone
+    SSHed in.
+
+    The fix is write-then-swap: build a complete temp file, force it to disk,
+    then move it into place in one indivisible step. A reader at any instant
+    sees either the previous good file or the new good file, never a partial one.
+    """
+    target = Path(file)
+    # The temp file must sit in the same directory as the target. os.replace()
+    # is only atomic within a single filesystem, so writing to /tmp and moving
+    # across would degrade into a non-atomic copy.
+    tmp = target.with_name(target.name + '.tmp')
+    try:
+        with open(tmp, 'wb') as f:
+            pickle.dump(data, f)
+            # flush() only pushes bytes out of Python's buffer into the OS page
+            # cache; fsync() is what forces them onto the SD card. Without this
+            # the swap below can publish a file whose contents have not actually
+            # been written yet, which is the very failure being fixed here.
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomic on POSIX: the target either still points at the old file or
+        # points at the fully written new one.
+        os.replace(tmp, target)
+
+        # The rename itself also needs flushing, otherwise the directory entry
+        # can be lost even though the file contents survived. Best effort --
+        # not every filesystem allows fsync on a directory handle, and failing
+        # to harden the rename is not worth losing an already-saved frame over.
+        try:
+            # For a bare filename like 'progress.pkl' this is Path('.').
+            dir_fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            logging.debug("Could not fsync directory for %s (harmless)", target)
+
+    except Exception:
+        # Leave no stale .tmp lying around to confuse the next run or a human
+        # poking at the directory over SSH.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 def load_data(file, data):
     if Path(file).exists():
@@ -197,7 +313,7 @@ if __name__ == '__main__':
     parser.add_argument("filename", help="the name of the movie file with .mp4")
     args = parser.parse_args()
     filename = args.filename
-    try:        
+    try:
         epd = epd7in5_V2_old.EPD()
         logging.info("init and Clear")
         epd.init()
@@ -205,13 +321,35 @@ if __name__ == '__main__':
         play_movie(epd, filename)
         logging.info("Finished!")
 
-        
-    except IOError as e:
-        raise Exception(logging.info(e))
-        
-    except KeyboardInterrupt:    
-        logging.info("ctrl + c:")
-        epd7in5_V2_old.epdconfig.module_exit()
-        exit()
+    except KeyboardInterrupt:
+        # A deliberate Ctrl-C is not a fault, so exit 0 to distinguish it from a
+        # crash. This needs its own handler because KeyboardInterrupt inherits
+        # from BaseException rather than Exception, so the handler below would
+        # never catch it.
+        logging.info("Interrupted by user (ctrl + c), shutting down")
+        release_display()
+        sys.exit(0)
+
+    except Exception:
+        # This replaces:
+        #
+        #     except IOError as e:
+        #         raise Exception(logging.info(e))
+        #
+        # which had two bugs. First, logging.info() returns None, so that line
+        # raised Exception(None) -- the original error's message and traceback
+        # were both discarded, leaving nothing to debug from. Second, only
+        # IOError was caught, so an IndexError out of frame_count (see the
+        # os.listdir/.DS_Store issue), a PIL decode error, or an SPI error all
+        # killed the run with a traceback on stderr, which `nohup ... 2>&1 &`
+        # sends to /dev/null.
+        #
+        # logging.exception() writes the message AND the full traceback to
+        # log.txt, which now survives restarts. The bare `raise` then re-raises
+        # the original exception with its traceback intact, so the process still
+        # exits non-zero and a supervisor can see it failed.
+        logging.exception("Unhandled error, shutting down")
+        release_display()
+        raise
 
 
