@@ -220,6 +220,25 @@ class EPD:
         epdconfig.delay_ms(100)
         self.ReadBusy()
 
+    def display_custom(self, image):
+        print("display 12")
+        if(self.width % 8 == 0):
+            Width = self.width // 8
+        else:
+            Width = self.width // 8 +1
+        Height = self.height
+        image1 = [0xFF] * int(self.width * self.height / 8)
+        for j in range(Height):
+                for i in range(Width):
+                    image1[i + j * Width] = ~image[i + j * Width]
+        # self.send_command(0x10)
+        # self.send_data2(image1)
+
+        # self.send_command(0x13)
+        # self.send_data2(image)
+
+        self.send_command(0x12)
+
     def Clear(self):
         self.send_command(0x10)
         self.send_data2([0xFF] * int(self.width * self.height / 8))
