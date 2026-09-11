@@ -279,40 +279,118 @@ def convert_image(im: Image, enhance = True):
 
 
 
+# Recommendation 7. How many frames may fail back-to-back before we treat the
+# problem as systemic rather than as a run of bad luck. Ten failures at one frame
+# per 150s is about 25 minutes of a blank screen, which is long enough to rule
+# out a transient glitch and short enough that a restart still helps.
+MAX_CONSECUTIVE_FRAME_ERRORS = 10
+
+
+def render_one_frame(clip, frame, epd, movie_name, folder):
+    """Extract, convert and show a single frame. Raises if anything goes wrong.
+
+    Split out of display_frame so the whole operation can be wrapped in one
+    try/except. Everything in here is per-frame work: nothing touches the loop
+    counter or the saved progress, so a failure part-way through leaves no
+    inconsistent state behind for the caller to unpick.
+    """
+    frame_path = '%s/out_img%d.jpg' % (folder, frame)
+    # if frame_path doesn't exist or doesn't contain anything
+    if (not Path(frame_path).exists()) or (os.stat(frame_path).st_size == 0):
+        generate_frame(clip, frame, movie_name)
+    im = Image.open(frame_path)
+
+    # alternate between converted and non converted image.
+    # This is to give some variety
+    converted_im = convert_image(im, enhance=False)
+    # if frame % 2 == 0:
+    #     converted_im = convert_image(im)
+    # else:
+    #     converted_im = convert_image(im, enhance=False)
+
+    # This setting seemed to work better with metropolis
+    # converted_im = Image.open(frame_path).convert('P')
+    sized = converted_im.resize((800, 480))
+    logging.info(f"Displaying image: {frame_path}")
+    display_on_e_ink(epd, sized)
+    os.remove(frame_path)
+
+
+def discard_bad_frame(folder, frame):
+    """Delete a frame image we could not use.
+
+    Leaving a truncated or zero-byte JPEG on disk is a trap. display_frame's
+    guard treats a zero-byte file as "needs extracting", so the bad file would be
+    handed back to ffmpeg on a later pass -- and before -y was added to the ffmpeg
+    calls, that was itself a source of silent hangs. Re-extracting is cheap;
+    reasoning about a half-written JPEG is not.
+    """
+    frame_path = Path('%s/out_img%d.jpg' % (folder, frame))
+    try:
+        frame_path.unlink(missing_ok=True)
+    except OSError:
+        logging.exception("Could not delete the unusable frame %s", frame_path)
+
+
 def display_frame(clip, frame, frame_len, progress, epd, movie_name):
     folder = '{}_frames'.format(movie_name)
+
+    # Counts failures back-to-back, so it resets on any success. Distinct from
+    # progress['errors'], which is a running total for the whole movie.
+    consecutive_errors = 0
+
     while frame < frame_len:
         start_t = time.time()
         logging.info("section: {}".format(clip))
         logging.info("frames in section: %d" %frame_len)
         logging.info("Frame: {}".format(frame))
-        frame_path = '%s/out_img%d.jpg' % (folder, frame)
-        # if frame_path doesn't exist or doesn't contain anything
-        if (not Path(frame_path).exists()) or (os.stat(frame_path).st_size == 0):
-            generate_frame(clip,frame, movie_name)
-        im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame)))
 
-        # alternate between converted and non converted image. 
-        # This is to give some variety
-        converted_im = convert_image(im, enhance=False)
-        # if frame % 2 == 0:
-        #     converted_im = convert_image(im)
-        # else:
-        #     converted_im = convert_image(im, enhance=False)
-        
-        # This setting seemed to work better with metropolis
-        # converted_im = Image.open(os.path.join('%s/out_img%d.jpg' % (folder, frame))).convert('P')
-        sized = converted_im.resize((800,480))
-        logging.info(f"Displaying image: {frame_path}")
-        display_on_e_ink(epd, sized)
-        os.remove(frame_path)
+        try:
+            render_one_frame(clip, frame, epd, movie_name, folder)
+            consecutive_errors = 0
+
+        except TimeoutError:
+            # Raised by ReadBusy() when the panel never released the BUSY line.
+            # This is not a bad frame -- the display itself is wedged, and no
+            # amount of moving on to the next frame will help. Let it propagate
+            # so the process exits and systemd restarts us with a fresh panel
+            # init. Swallowing this here would undo the whole point of the BUSY
+            # timeout.
+            raise
+
+        except Exception:
+            # One frame failed. A months-long run should not end because of it,
+            # so log it properly, record it, and move on to the next frame.
+            #
+            # Note the frame is SKIPPED rather than retried. Retrying the same
+            # frame forever would look healthy to the watchdog -- pings would
+            # keep flowing while the screen never changed -- which is a worse
+            # failure than losing one frame out of roughly two hundred thousand.
+            consecutive_errors += 1
+            progress['errors'] = progress.get('errors', 0) + 1
+            logging.exception(
+                "Frame %d failed (%d in a row, %d total for this movie), skipping it",
+                frame, consecutive_errors, progress['errors'])
+            discard_bad_frame(folder, frame)
+
+            if consecutive_errors >= MAX_CONSECUTIVE_FRAME_ERRORS:
+                # Not bad luck any more. Something systemic is wrong: the movie
+                # file has gone, the disk is full, the panel is failing. Stop,
+                # so systemd restarts us and -- if it keeps happening --
+                # StartLimitBurst surfaces the unit as failed instead of letting
+                # it quietly skip its way through the whole film.
+                raise RuntimeError(
+                    "{} frames failed in a row, giving up rather than skipping "
+                    "through the movie".format(consecutive_errors))
+
+        # Reached on success and on a skipped frame alike. Advancing in both
+        # cases is what stops a single bad frame blocking the run forever.
         frame += 1
         progress['frame'] = frame
         save_data('progress.pkl', progress)
 
-        # A frame has been displayed and the new position is safely on disk.
-        # This is the one point in the loop where forward progress is proven, so
-        # it is the right place to tell the watchdog we are alive.
+        # The position is safely on disk, so the loop has demonstrably moved
+        # forward. This is the right place to tell the watchdog we are alive.
         watchdog_ping()
 
         end_t = time.time()
