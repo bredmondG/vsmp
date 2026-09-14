@@ -3,6 +3,40 @@
 Displays a movie on a Waveshare 7.5" black-and-white e-paper panel (800x480)
 driven by a Raspberry Pi, one frame at a time, at 24 frames per hour.
 
+## First-time setup on a new Pi: enable SPI
+
+The panel is driven over SPI, which is **off by default** on a fresh Raspberry Pi
+OS install. Cloning the repo does not change that, so enable it before anything
+else:
+
+```
+sudo raspi-config nonint do_spi 0
+sudo reboot
+```
+
+Verify after the reboot — both nodes should exist:
+
+```
+ls -l /dev/spidev*        # expect /dev/spidev0.0 and /dev/spidev0.1
+```
+
+Without this, `epd.init()` fails immediately on `spidev.open(0, 0)`:
+
+```
+File "epd/epdconfig.py", line 105, in module_init
+    self.SPI.open(0, 0)
+FileNotFoundError: [Errno 2] No such file or directory
+```
+
+The missing file is `/dev/spidev0.0`. Equivalent to the command above:
+`sudo raspi-config` → Interface Options → SPI, or add `dtparam=spi=on` to
+`/boot/firmware/config.txt`. A reboot is required either way.
+
+If the device node exists but you get `PermissionError` instead, the account
+running the player is not in the `spi` and `gpio` groups. Check with `groups`,
+then `sudo usermod -aG spi,gpio $USER` and log in again. This applies to the
+`User=` account in `systemd/vsmp.service` too.
+
 ## Running as a service (recommended)
 
 Runs on boot and restarts itself if it stops. Details and all the tunables are
