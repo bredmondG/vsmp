@@ -40,11 +40,14 @@ After=multi-user.target
 # and are silently ignored if placed in [Service] on current versions.
 #
 # They bound a specific known case. When a movie finishes, play_movie() returns
-# and the process exits 0. Restart=always restarts it; the new process finds
-# every section already listed in progress.pkl under 'sections_ran', logs
-# "Already Ran" for each, and exits 0 again. Without a limit that is a
-# 10-second loop forever. With it, systemd gives up after 5 attempts and the
-# unit enters the failed state, which is visible in `systemctl status`.
+# and the process exits 0. Restart=always restarts it; the new process reads
+# state.json, sees "finished": true, logs that there is nothing to do and exits
+# 0 again. Without a limit that is a 10-second loop forever. With it, systemd
+# gives up after 5 attempts and the unit enters the failed state, which is
+# visible in `systemctl status`.
+#
+# To play the film again, add --restart to VSMP_ARGS in /etc/default/vsmp (or
+# delete state.json) and `systemctl reset-failed vsmp && systemctl start vsmp`.
 StartLimitIntervalSec=600
 StartLimitBurst=5
 
@@ -63,13 +66,25 @@ Type=simple
 # run an activate script in.
 User=pi
 WorkingDirectory=/home/pi/vsmp
-ExecStart=/home/pi/venv/bin/python vsmp.py ${VSMP_MOVIE}
+ExecStart=/home/pi/venv/bin/python vsmp.py ${VSMP_MOVIE} $VSMP_ARGS
 # ---------------------------------------------------------------------------
 
-# WorkingDirectory above is load-bearing, not cosmetic. log.txt, progress.pkl,
-# the pre-sliced movie directory and the <movie>_frames directory are all
-# resolved relative to the current directory, so the player only finds its own
-# state if it starts here.
+# Note the two different expansion forms above, which is not a typo:
+#
+#   ${VSMP_MOVIE}   braces  -> exactly ONE argument, whitespace preserved.
+#                              Correct for a filename, which may contain spaces.
+#   $VSMP_ARGS      no braces -> split at whitespace into SEVERAL arguments.
+#                              Correct for a list of options, and it expands to
+#                              nothing at all when unset or empty, so an older
+#                              /etc/default/vsmp without VSMP_ARGS still works.
+
+# WorkingDirectory above is load-bearing, not cosmetic. log.txt, state.json and
+# the <movie>_frames scratch directory are all resolved relative to the current
+# directory, so the player only finds its own state if it starts here.
+#
+# state.json replaced progress.pkl. If you are upgrading, the old pickle is
+# ignored rather than migrated -- its frame number was an index within a section
+# and cannot be converted to an absolute frame. See DEPLOY.md.
 
 # The movie filename lives in a separate file so changing films does not mean
 # editing a unit and remembering daemon-reload. Required, not optional (no
@@ -89,25 +104,38 @@ Restart=always
 RestartSec=10
 
 # ---- Liveness watchdog ----------------------------------------------------
-# Restarting on exit is not enough on its own. generate_frame() runs ffmpeg via
-# os.popen(...).read(), which has no timeout, so a wedged ffmpeg leaves a live
-# process that never shows another frame. Nothing crashes, nothing exits, and
-# nothing above would notice.
+# Restarting on exit is not enough on its own: a stall inside the frame loop
+# leaves a live process that never shows another frame, so nothing crashes,
+# nothing exits, and nothing above would notice.
 #
 # With WatchdogSec set, systemd passes WATCHDOG_USEC to the process and expects
 # a WATCHDOG=1 message at least every half of that. vsmp.py sends one after each
-# frame is displayed and its position saved, and again periodically while
-# waiting out the gap to the next frame. If the frame loop stalls, the messages
-# stop and systemd restarts the service.
+# frame is displayed and its position saved, and every 30s while waiting out the
+# gap to the next frame. If the frame loop stalls, the messages stop and systemd
+# restarts the service.
 #
-# Choosing the value: it must comfortably exceed the slowest legitimate
-# extract-and-display cycle, or healthy playback will be restarted repeatedly
-# and never progress. Extraction cost currently grows with position within a
-# section, because generate_frame uses ffmpeg's select=gte() filter, and it has
-# never been measured on this Pi. 600s is therefore deliberately generous. If
-# you see the journal reporting watchdog timeouts during otherwise healthy
-# playback, RAISE this value rather than removing it, and look at
-# recommendation 21 to make extraction cost predictable.
+# Choosing the value. This used to be an admitted guess. It can now be derived,
+# because every step in a frame is individually bounded and the idle gap is
+# pinged through rather than slept through in one block. systemd needs a ping
+# every WatchdogSec/2, and the longest legitimate silence is one whole
+# extract-and-display:
+#
+#     ffmpeg extraction      <= 120s   FFMPEG_TIMEOUT_S in vsmp.py
+#     panel refresh          <= 120s   4 x ReadBusy(), each bounded at 30s by
+#                                      BUSY_TIMEOUT_S in the driver (rec 2)
+#     -------------------------------
+#     worst legitimate gap   <= 240s
+#
+# The 150s wait between frames does NOT add to that, because pings continue
+# every 30s throughout it. So WatchdogSec must exceed 2 x 240 = 480s, and 600s
+# gives 25% headroom. Measured extraction on a dev machine is 0.13-0.21s
+# anywhere in a 2-hour film (input seeking, recommendation 21), so the 120s
+# bound is a fault ceiling rather than a normal cost -- but it has still not
+# been measured on this Pi.
+#
+# If the journal reports watchdog timeouts during otherwise healthy playback,
+# RAISE this value rather than removing it, and check "extract_s=" in the
+# per-frame log line to see which of the two terms above is actually large.
 #
 # NotifyAccess is implicitly set to main when WatchdogSec is used, but it is
 # stated here so the mechanism is obvious to anyone reading the unit. Type is
