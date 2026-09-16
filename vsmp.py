@@ -30,7 +30,19 @@ from pathlib import Path
 
 from PIL import Image, ImageEnhance
 
-from epd import epd7in5_V2_old
+# NOTE: the e-paper driver is imported lazily inside the play path, NOT here.
+#
+# `from epd import epd7in5_V2_old` pulls in epd/epdconfig.py, whose module body
+# does `implementation = RaspberryPi()`, and RaspberryPi.__init__ claims the
+# GPIO pins (gpiozero.LED(...)) the instant it runs. Importing at module top
+# therefore grabs the hardware for *every* invocation -- including
+# `vsmp.py status`, which is meant to read a file and print it without going
+# anywhere near the panel.
+#
+# When the player service is already running it holds those pins, so a status
+# command that imported the driver died with `lgpio.error: 'GPIO busy'` before
+# cmd_status ever ran. Deferring the import to cmd_play() keeps status a pure
+# read (see main(), which routes status away from any display code).
 
 LOG_FILE = 'log.txt'
 LOG_MAX_BYTES = 5 * 1024 * 1024   # rotate once a log file reaches 5 MB
@@ -940,6 +952,11 @@ def release_display():
     an error, and a cleanup failure must not mask the original problem.
     """
     try:
+        # Lazy import to match cmd_play: the driver must never be loaded on the
+        # status path. This only runs on an abnormal exit from cmd_play, by
+        # which point the import has already succeeded, so the cost here is just
+        # a dictionary lookup of the cached module.
+        from epd import epd7in5_V2_old
         epd7in5_V2_old.epdconfig.module_exit()
         logging.info("Display released (SPI closed, panel powered down)")
     except Exception:
@@ -1218,6 +1235,12 @@ def cmd_play(args):
     # "Howl's" with an extension of ".Moving". pathlib gets this right, so the
     # movie no longer has to be renamed to run.
     movie_name = movie.name
+
+    # Imported here rather than at module top so that `vsmp.py status` never
+    # loads the driver -- importing epd/epdconfig.py claims the GPIO pins as a
+    # side effect, which makes status fail with 'GPIO busy' whenever the player
+    # is already running. See the note by the imports at the top of the file.
+    from epd import epd7in5_V2_old
 
     configure_watchdog()
 
