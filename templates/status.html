@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% if refresh and summary %}<meta http-equiv="refresh" content="{{ refresh }}">{% endif %}
+  <title>vsmp status{% if summary and summary.movie %} — {{ summary.movie }}{% endif %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="card">
+    <h1>Very Slow Movie Player</h1>
+
+    {% if not summary %}
+      <p class="muted">No state yet — the player has not written a frame.</p>
+      <p class="muted small">Looking for <code>{{ state_path }}</code>.</p>
+    {% else %}
+      <p class="movie">{{ summary.movie or 'unknown movie' }}</p>
+
+      <div class="bar" role="progressbar"
+           aria-valuenow="{{ '%.1f'|format(summary.percent) }}"
+           aria-valuemin="0" aria-valuemax="100"
+           aria-label="playback progress">
+        <div class="bar-fill" style="width: {{ '%.3f'|format(summary.percent) }}%"></div>
+      </div>
+      <p class="percent">{{ '%.3f'|format(summary.percent) }}%
+        <span class="state state-{{ summary.state }}">{{ summary.state }}</span>
+      </p>
+
+      <dl class="facts">
+        <dt>frame</dt><dd>{{ summary.frame }} of {{ summary.total_frames }}</dd>
+        <dt>timecode</dt><dd>{{ summary.timecode }} of {{ summary.duration }}</dd>
+        <dt>last frame</dt><dd>{{ summary.last_frame_utc }}</dd>
+        <dt>next frame</dt><dd>{{ summary.next_frame_utc }}</dd>
+        <dt>this run</dt><dd>{{ summary.frames_this_run }} frames since {{ summary.run_started_utc or 'unknown' }}</dd>
+        <dt>last frame cost</dt><dd>extract {{ summary.last_extract_s }}s, display {{ summary.last_display_s }}s</dd>
+        <dt>errors / anomalies</dt><dd>{{ summary.errors }} / {{ summary.anomalies }}</dd>
+        {% if summary.remaining_frames is not none %}
+        <dt>remaining</dt>
+        <dd>{{ summary.remaining_frames }} frames, about
+            {{ '%.1f'|format(summary.remaining_days) }} days at
+            {{ summary.frames_per_hour }} frames/hour</dd>
+        {% endif %}
+      </dl>
+    {% endif %}
+
+    <footer class="muted small">
+      {% if refresh and summary %}auto-refreshing every {{ refresh }}s ·{% endif %}
+      <a href="{{ url_for('status_json') }}">status.json</a>
+    </footer>
+  </main>
+</body>
+</html>

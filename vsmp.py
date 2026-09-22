@@ -1171,6 +1171,65 @@ def play_movie(epd, movie, state_path, state, info, contrast):
 # --- subcommands -------------------------------------------------------------
 
 
+def read_state(state_path=STATE_FILE):
+    """Load and parse the state file, or return None if it does not exist.
+
+    Reads only, and the player writes state.json atomically, so this is safe to
+    call at any time -- including from another process such as the web server
+    (see webapp.py), which is why this is a standalone function rather than
+    being inlined in cmd_status.
+    """
+    target = Path(state_path)
+    if not target.exists():
+        return None
+    with open(target) as f:
+        return json.load(f)
+
+
+def summarize_state(state):
+    """Turn a raw state dict into the derived, display-ready summary.
+
+    This is the single source of truth for "where is the player, in numbers a
+    human cares about": percent, frame counts, timecodes and the remaining-time
+    estimate. cmd_status prints from it and the web server renders from it, so
+    the CLI and the web page can never drift apart. Pure and side-effect free;
+    give it a dict, get a dict back.
+    """
+    total = state.get('total_frames') or 0
+    frame = state.get('frame') or 0
+    finished = bool(state.get('finished'))
+
+    summary = {
+        'movie': state.get('movie'),
+        'frame': frame,
+        'total_frames': total,
+        'percent': state.get('percent', 0.0),
+        'timecode': state.get('timecode'),
+        'duration': format_timecode(state.get('duration_s') or 0),
+        'duration_s': state.get('duration_s') or 0,
+        'state': 'finished' if finished else 'playing',
+        'finished': finished,
+        'last_frame_utc': state.get('last_frame_utc') or 'never',
+        'next_frame_utc': state.get('next_frame_utc') or 'not scheduled',
+        'frames_this_run': state.get('frames_this_run', 0),
+        'run_started_utc': state.get('run_started_utc'),
+        'last_extract_s': state.get('last_extract_s'),
+        'last_display_s': state.get('last_display_s'),
+        'errors': state.get('errors', 0),
+        'anomalies': state.get('anomalies', 0),
+        'remaining_frames': None,
+        'remaining_days': None,
+        'frames_per_hour': FRAMES_PER_HOUR,
+    }
+
+    if total and not finished:
+        remaining_frames = total - frame
+        summary['remaining_frames'] = remaining_frames
+        summary['remaining_days'] = remaining_frames / FRAMES_PER_HOUR / 24
+
+    return summary
+
+
 def cmd_status(args):
     """Print the current position (recommendation 11).
 
@@ -1179,46 +1238,39 @@ def cmd_status(args):
     log. Reads only; safe to run while the player is going, because state writes
     are atomic.
     """
-    target = Path(args.state)
-    if not target.exists():
-        print("No {} yet -- the player has not written a frame.".format(target))
+    state = read_state(args.state)
+    if state is None:
+        print("No {} yet -- the player has not written a frame.".format(args.state))
         if Path(LEGACY_STATE_FILE).exists():
             print("(An old {} is present. It is not used by this version.)"
                   .format(LEGACY_STATE_FILE))
         return 1
 
-    with open(target) as f:
-        state = json.load(f)
-
     if args.json:
         print(json.dumps(state, indent=2, sort_keys=True))
         return 0
 
-    total = state.get('total_frames') or 0
-    frame = state.get('frame') or 0
+    s = summarize_state(state)
     width = 40
-    filled = int(width * frame / total) if total else 0
+    filled = int(width * s['frame'] / s['total_frames']) if s['total_frames'] else 0
 
-    print("movie      {}".format(state.get('movie')))
+    print("movie      {}".format(s['movie']))
     print("progress   [{}{}] {:.3f}%".format('#' * filled, '.' * (width - filled),
-                                             state.get('percent', 0.0)))
-    print("frame      {} of {}".format(frame, total))
-    print("timecode   {} of {}".format(
-        state.get('timecode'), format_timecode(state.get('duration_s') or 0)))
-    print("state      {}".format('finished' if state.get('finished') else 'playing'))
-    print("last frame {}".format(state.get('last_frame_utc') or 'never'))
-    print("next frame {}".format(state.get('next_frame_utc') or 'not scheduled'))
+                                             s['percent']))
+    print("frame      {} of {}".format(s['frame'], s['total_frames']))
+    print("timecode   {} of {}".format(s['timecode'], s['duration']))
+    print("state      {}".format(s['state']))
+    print("last frame {}".format(s['last_frame_utc']))
+    print("next frame {}".format(s['next_frame_utc']))
     print("this run   {} frames since {}".format(
-        state.get('frames_this_run', 0), state.get('run_started_utc')))
+        s['frames_this_run'], s['run_started_utc']))
     print("last frame took  extract {}s, display {}s".format(
-        state.get('last_extract_s'), state.get('last_display_s')))
-    print("errors     {}   anomalies {}".format(
-        state.get('errors', 0), state.get('anomalies', 0)))
+        s['last_extract_s'], s['last_display_s']))
+    print("errors     {}   anomalies {}".format(s['errors'], s['anomalies']))
 
-    if total and not state.get('finished'):
-        remaining_hours = (total - frame) / FRAMES_PER_HOUR
+    if s['remaining_frames'] is not None:
         print("remaining  {} frames, about {:.1f} days at {} frames/hour".format(
-            total - frame, remaining_hours / 24, FRAMES_PER_HOUR))
+            s['remaining_frames'], s['remaining_days'], s['frames_per_hour']))
     return 0
 
 

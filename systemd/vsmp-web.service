@@ -1,0 +1,99 @@
+# Very Slow Movie Player -- status web server systemd unit
+#
+# Serves the player's status over HTTP on the local network, so you can glance
+# at where the film has got to from a phone or laptop instead of SSHing in. It
+# reads the same state.json the CLI does (via vsmp.read_state/summarize_state)
+# and writes nothing, so it is safe to run alongside the player.
+#
+# This is a separate unit from vsmp.service on purpose: the player owns the
+# panel and the GPIO pins, the web server owns a TCP port. Either can be
+# restarted without touching the other.
+#
+# ---------------------------------------------------------------------------
+# Install (edit the PATHS block below first)
+#
+#   sudo cp systemd/vsmp-web.service /etc/systemd/system/vsmp-web.service
+#   sudo cp systemd/vsmp-web.env.example /etc/default/vsmp-web
+#   sudo nano /etc/default/vsmp-web        # set the port/bind if you want
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vsmp-web
+#
+# Operate
+#
+#   systemctl status vsmp-web
+#   journalctl -u vsmp-web -f
+#   sudo systemctl restart vsmp-web
+#
+# Then browse to  http://<pi-hostname>:8080/   from any device on the LAN.
+#
+# After editing this file, always run: sudo systemctl daemon-reload
+# ---------------------------------------------------------------------------
+
+[Unit]
+Description=Very Slow Movie Player status web server (Flask/gunicorn)
+# The web server does need the network up, unlike the player.
+After=network-online.target
+Wants=network-online.target
+
+# Restart rate limiting, same idea as the player unit: bound a crash loop so a
+# persistently broken start ends in `failed` (visible in systemctl status)
+# rather than hammering forever. These belong in [Unit] on current systemd.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# ---- PATHS: adjust these for your machine ---------------------------------
+# Same assumed layout as vsmp.service: the virtualenv is a sibling of the repo.
+#
+#   /home/pi/
+#   |-- venv/          <- virtualenv with requirements.txt installed
+#   `-- vsmp/          <- this repo, contains webapp.py
+#
+# WorkingDirectory must be the repo so that webapp.py can `import vsmp` and so
+# that a relative VSMP_STATE (the default, "state.json") resolves to the same
+# file the player writes.
+User=pi
+WorkingDirectory=/home/pi/vsmp
+ExecStart=/home/pi/venv/bin/gunicorn \
+    --workers 2 \
+    --bind ${VSMP_WEB_BIND} \
+    webapp:app
+# ---------------------------------------------------------------------------
+
+# Config lives in an env file so changing the port does not mean editing the
+# unit and remembering daemon-reload. Optional (leading dash): the unit still
+# starts with sensible built-in defaults if the file is absent, because the
+# reference below provides them.
+EnvironmentFile=-/etc/default/vsmp-web
+
+# Default bind if the env file does not set one: all interfaces, port 8080, so
+# it is reachable on the LAN out of the box. Override VSMP_WEB_BIND in the env
+# file to restrict it (e.g. 127.0.0.1:8080 for localhost-only behind a proxy).
+Environment=VSMP_WEB_BIND=0.0.0.0:8080
+Environment=PYTHONUNBUFFERED=1
+
+# Restart on both crashes and clean exits; StartLimit above bounds a loop.
+Restart=always
+RestartSec=5
+
+# ---- Hardening ------------------------------------------------------------
+# This process only needs to read state.json and serve HTTP. It never touches
+# the panel, GPIO, or anything outside the repo, so lock it down. If you later
+# add a route that writes, relax ProtectSystem/ReadWritePaths accordingly.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+# The repo dir must stay readable; nothing here needs to be writable. If a
+# future feature writes (a cache, say), add ReadWritePaths=/home/pi/vsmp.
+ReadOnlyPaths=/home/pi/vsmp
+# ---------------------------------------------------------------------------
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vsmp-web
+
+[Install]
+WantedBy=multi-user.target
