@@ -24,6 +24,9 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+LOCAL_TZ = ZoneInfo('America/Denver')
 from fractions import Fraction
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -632,8 +635,8 @@ def extract_frame(movie, out_path, frame, info):
 # --- state -------------------------------------------------------------------
 
 
-def utc_now_iso():
-    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+def local_now_iso():
+    return datetime.now(LOCAL_TZ).strftime('%Y-%m-%dT%H:%M:%S%z')
 
 
 def new_state(movie_name, info):
@@ -661,9 +664,9 @@ def new_state(movie_name, info):
         'percent': 0.0,
         'timecode': '00:00:00.000',
         'finished': False,
-        'last_frame_utc': None,
-        'next_frame_utc': None,
-        'run_started_utc': utc_now_iso(),
+        'last_frame_local': None,
+        'next_frame_local': None,
+        'run_started_local': local_now_iso(),
         'frames_this_run': 0,
         'last_extract_s': None,
         'last_display_s': None,
@@ -822,7 +825,7 @@ def load_state(path, movie_name, info, restart=False):
     # Fields added by later versions, so a hand-edited or older file still works.
     for key, value in new_state(movie_name, info).items():
         state.setdefault(key, value)
-    state['run_started_utc'] = utc_now_iso()
+    state['run_started_local'] = local_now_iso()
     state['frames_this_run'] = 0
 
     logging.info("Resuming %s at frame %d of %d (%.2f%%)",
@@ -1081,7 +1084,7 @@ def play_movie(epd, movie, state_path, state, info, contrast):
         position_s = float(Fraction(state['frame']) / info['fps'])
         state['timecode'] = format_timecode(position_s)
         state['percent'] = round(100.0 * state['frame'] / max(1, total), 4)
-        state['last_frame_utc'] = utc_now_iso()
+        state['last_frame_local'] = local_now_iso()
         state['last_extract_s'] = round(extract_s, 3) if extract_s is not None else None
         state['last_display_s'] = round(display_s, 3) if display_s is not None else None
 
@@ -1107,9 +1110,9 @@ def play_movie(epd, movie, state_path, state, info, contrast):
                 behind, frame)
             next_deadline = now_monotonic + FRAME_INTERVAL_S
 
-        state['next_frame_utc'] = datetime.fromtimestamp(
-            time.time() + (next_deadline - time.monotonic()), timezone.utc
-        ).strftime('%Y-%m-%dT%H:%M:%SZ')
+        state['next_frame_local'] = datetime.fromtimestamp(
+            time.time() + (next_deadline - time.monotonic()), LOCAL_TZ
+        ).strftime('%Y-%m-%dT%H:%M:%S%z')
 
         if state['frame'] >= total:
             state['finished'] = True
@@ -1155,7 +1158,7 @@ def play_movie(epd, movie, state_path, state, info, contrast):
             state['frame'], total, state['percent'], state['timecode'],
             'skip' if extract_s is None else '{:.2f}'.format(extract_s),
             'skip' if display_s is None else '{:.2f}'.format(display_s),
-            state['next_frame_utc'], state['errors'], state['anomalies'])
+            state['next_frame_local'], state['errors'], state['anomalies'])
 
         if state['frame'] >= total:
             break
@@ -1163,7 +1166,7 @@ def play_movie(epd, movie, state_path, state, info, contrast):
         sleep_until(next_deadline)
 
     state['finished'] = True
-    state['next_frame_utc'] = None
+    state['next_frame_local'] = None
     save_state(state_path, state)
     logging.info("Movie finished at frame %d of %d (%d errors, %d anomalies)",
                  state['frame'], state['total_frames'],
@@ -1212,10 +1215,10 @@ def summarize_state(state):
         'duration_s': state.get('duration_s') or 0,
         'state': 'finished' if finished else 'playing',
         'finished': finished,
-        'last_frame_utc': state.get('last_frame_utc') or 'never',
-        'next_frame_utc': state.get('next_frame_utc') or 'not scheduled',
+        'last_frame_local': state.get('last_frame_local') or 'never',
+        'next_frame_local': state.get('next_frame_local') or 'not scheduled',
         'frames_this_run': state.get('frames_this_run', 0),
-        'run_started_utc': state.get('run_started_utc'),
+        'run_started_local': state.get('run_started_local'),
         'last_extract_s': state.get('last_extract_s'),
         'last_display_s': state.get('last_display_s'),
         'errors': state.get('errors', 0),
@@ -1263,10 +1266,10 @@ def cmd_status(args):
     print("frame      {} of {}".format(s['frame'], s['total_frames']))
     print("timecode   {} of {}".format(s['timecode'], s['duration']))
     print("state      {}".format(s['state']))
-    print("last frame {}".format(s['last_frame_utc']))
-    print("next frame {}".format(s['next_frame_utc']))
+    print("last frame {}".format(s['last_frame_local']))
+    print("next frame {}".format(s['next_frame_local']))
     print("this run   {} frames since {}".format(
-        s['frames_this_run'], s['run_started_utc']))
+        s['frames_this_run'], s['run_started_local']))
     print("last frame took  extract {}s, display {}s".format(
         s['last_extract_s'], s['last_display_s']))
     print("errors     {}   anomalies {}".format(s['errors'], s['anomalies']))

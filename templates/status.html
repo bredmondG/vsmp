@@ -30,9 +30,9 @@
       <dl class="facts">
         <dt>frame</dt><dd>{{ summary.frame }} of {{ summary.total_frames }}</dd>
         <dt>timecode</dt><dd>{{ summary.timecode }} of {{ summary.duration }}</dd>
-        <dt>last frame</dt><dd>{{ summary.last_frame_utc }}</dd>
-        <dt>next frame</dt><dd>{{ summary.next_frame_utc }}</dd>
-        <dt>this run</dt><dd>{{ summary.frames_this_run }} frames since {{ summary.run_started_utc or 'unknown' }}</dd>
+        <dt>last frame</dt><dd>{{ summary.last_frame_local }}</dd>
+        <dt>next frame</dt><dd>{{ summary.next_frame_local }}</dd>
+        <dt>this run</dt><dd>{{ summary.frames_this_run }} frames since {{ summary.run_started_local or 'unknown' }}</dd>
         <dt>last frame cost</dt><dd>extract {{ summary.last_extract_s }}s, display {{ summary.last_display_s }}s</dd>
         <dt>errors / anomalies</dt><dd>{{ summary.errors }} / {{ summary.anomalies }}</dd>
         {% if summary.remaining_frames is not none %}
