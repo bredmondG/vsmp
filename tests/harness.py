@@ -13,10 +13,11 @@ Importing it does three things, in this order, and the order matters:
   2. Puts the repo root on sys.path so `import vsmp` works from anywhere.
   3. chdir()s into a fresh scratch directory under tests/work/.
 
-Step 3 has to happen before `import vsmp`, because vsmp calls
-configure_logging() at import time and writes log.txt relative to the current
-directory. Without it the tests would litter the repo with log.txt and
-state.json -- which the suite then asserts has not happened.
+Step 3 keeps the repo clean. Importing vsmp itself no longer writes anything
+(logging is configured in main() on the play path, not at import time), but the
+tests that actually exercise the player still write log.txt and state.json
+relative to the current directory. chdir'ing into a scratch dir first keeps
+those artifacts out of the repo -- which the suite then asserts has not happened.
 """
 import os
 import shutil

@@ -125,10 +125,13 @@ def configure_logging():
     root.addHandler(handler)
 
 
-configure_logging()
-# A restart is the single most useful thing to be able to find in the log,
-# so mark it explicitly now that previous runs are no longer overwritten.
-logging.info('=== vsmp starting ===')
+# NOTE: logging is configured in main() on the play path, NOT here at import
+# time. configure_logging() opens log.txt for writing via RotatingFileHandler,
+# which is a side effect no importer should trigger just by `import vsmp`. The
+# status CLI does not need it (it is a pure read), and neither does the web
+# server (webapp.py imports this module to reuse read_state/summarize_state and
+# must not open -- let alone require write access to -- the player's log file).
+# See main().
 
 # --- systemd watchdog --------------------------------------------------------
 #
@@ -1380,9 +1383,19 @@ def main(argv):
     args = parse_args(argv)
 
     # `status` reads a file and prints it. It must not touch the panel, and it
-    # must not be caught by the display cleanup below.
+    # must not be caught by the display cleanup below. It also does not set up
+    # file logging: it is a pure read, and configuring the RotatingFileHandler
+    # would open log.txt for writing for no reason.
     if args.func is cmd_status:
         return cmd_status(args)
+
+    # Only the player writes a log. Configure it here rather than at import
+    # time so that importing this module (e.g. from the web server) has no
+    # side effects. A restart is the single most useful thing to find in the
+    # log, so mark it explicitly now that previous runs are no longer
+    # overwritten (configure_logging appends rather than truncates).
+    configure_logging()
+    logging.info('=== vsmp starting ===')
 
     try:
         return cmd_play(args)

@@ -86,9 +86,12 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
-# The repo dir must stay readable; nothing here needs to be writable. If a
-# future feature writes (a cache, say), add ReadWritePaths=/home/pi/vsmp.
-ReadOnlyPaths=/home/pi/vsmp
+# The repo dir must stay readable; nothing here needs to be writable, because
+# the web server is a pure reader (it imports vsmp only for read_state/
+# summarize_state, and importing vsmp has no side effects). Point this at your
+# real repo path -- the same directory as WorkingDirectory above. If a future
+# feature writes (a cache, say), swap this line for ReadWritePaths=<that path>.
+ReadOnlyPaths=/home/rpi5/development/vsmp
 # ---------------------------------------------------------------------------
 
 StandardOutput=journal
