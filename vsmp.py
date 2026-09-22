@@ -54,6 +54,25 @@ LOG_BACKUP_COUNT = 5              # keep log.txt plus log.txt.1 ... log.txt.5
 PANEL_W = 800
 PANEL_H = 480
 
+# Letterbox bar colour. The scaled frame rarely matches the panel's 1.667
+# aspect exactly, so panel_geometry() pads it out to 800x480 with bars on the
+# short axis. This maps the user-facing choice to the token ffmpeg's
+# `pad ... color=` accepts.
+#
+# A caveat that matters on this specific panel: it is 1-bit, and the driver's
+# getbuffer() runs the image through Floyd-Steinberg dithering (convert('1')).
+# Pure black and pure white survive that as solid bars. Anything in between
+# does not -- a mid grey dithers to a black-and-white checkerboard rather than
+# a solid tone. 'gray' is offered anyway, kept deliberately near-black so it
+# mostly rounds to black; it exists for grayscale panels and for anyone who
+# wants to judge it by eye, not because it renders as a clean grey here.
+BAR_COLORS = {
+    'black': 'black',
+    'white': 'white',
+    'gray': '0x1e1e1e',   # ~12% grey; on a 1-bit panel this dithers, see above
+}
+DEFAULT_BAR_COLOR = 'black'
+
 # The whole point of the project: 24 frames per hour, i.e. one every 150s.
 FRAMES_PER_HOUR = 24
 FRAME_INTERVAL_S = 3600.0 / FRAMES_PER_HOUR
@@ -400,7 +419,7 @@ def frame_timestamp(frame, fps):
     return ts
 
 
-def panel_geometry(width, height, sar):
+def panel_geometry(width, height, sar, bar_color=DEFAULT_BAR_COLOR):
     """Work out the scale-and-letterbox geometry for this movie.
 
     Recommendation 26. The old code did ``im.resize((800, 480))``, which
@@ -416,6 +435,11 @@ def panel_geometry(width, height, sar):
     especially) can have a SAR far from 1:1. Correcting for SAR here also keeps
     the ffmpeg command free of nested filter expressions and makes the geometry
     loggable and testable.
+
+    ``bar_color`` names the letterbox fill (see BAR_COLORS). It is resolved to
+    an ffmpeg colour token here and carried through the geometry dict as
+    ``pad_color`` so extract_frame() stays free of a separate colour argument --
+    everything the ffmpeg pad filter needs already flows through this dict.
     """
     display_w = Fraction(width) * (sar or Fraction(1))
     display_h = Fraction(height)
@@ -431,10 +455,11 @@ def panel_geometry(width, height, sar):
         'pad_x': (PANEL_W - out_w) // 2,
         'pad_y': (PANEL_H - out_h) // 2,
         'display_aspect': float(display_w / display_h),
+        'pad_color': BAR_COLORS[bar_color],
     }
 
 
-def probe_video(movie, count_frames=False):
+def probe_video(movie, count_frames=False, bar_color=DEFAULT_BAR_COLOR):
     """Read frame rate, duration, geometry and total frame count, once.
 
     Recommendation 23. The old ``frame_count()`` shelled out to ffprobe for
@@ -530,7 +555,7 @@ def probe_video(movie, count_frames=False):
     if total <= 0:
         raise RuntimeError("Refusing to play {}: computed {} frames".format(movie, total))
 
-    geometry = panel_geometry(width, height, sar)
+    geometry = panel_geometry(width, height, sar, bar_color)
     info = {
         'fps': fps,
         'duration_s': duration,
@@ -545,10 +570,11 @@ def probe_video(movie, count_frames=False):
 
     logging.info(
         "Probed %s: %dx%d sar=%s dar=%.4f fps=%s (%.4f) duration=%s "
-        "frames=%d (%s) -> scaling to %dx%d padded to %dx%d",
+        "frames=%d (%s) -> scaling to %dx%d padded to %dx%d with %s bars",
         movie.name, width, height, sar, geometry['display_aspect'],
         fps, float(fps), format_timecode(duration), total, source,
-        geometry['width'], geometry['height'], PANEL_W, PANEL_H)
+        geometry['width'], geometry['height'], PANEL_W, PANEL_H,
+        geometry['pad_color'])
     return info
 
 
@@ -598,11 +624,12 @@ def extract_frame(movie, out_path, frame, info):
     timestamp = format_seconds(frame_timestamp(frame, info['fps']))
     video_filter = (
         'scale={w}:{h},'
-        'pad={pw}:{ph}:{px}:{py}:color=white,'
+        'pad={pw}:{ph}:{px}:{py}:color={color},'
         'format=gray'
     ).format(w=geometry['width'], h=geometry['height'],
              pw=PANEL_W, ph=PANEL_H,
-             px=geometry['pad_x'], py=geometry['pad_y'])
+             px=geometry['pad_x'], py=geometry['pad_y'],
+             color=geometry['pad_color'])
 
     run_tool([
         'ffmpeg', '-y', '-nostdin',
@@ -1299,7 +1326,8 @@ def cmd_play(args):
 
     configure_watchdog()
 
-    info = probe_video(movie, count_frames=args.count_frames)
+    info = probe_video(movie, count_frames=args.count_frames,
+                       bar_color=args.bar_color)
     state = load_state(args.state, movie_name, info, restart=args.restart)
 
     if state['finished'] and not args.restart:
@@ -1337,6 +1365,12 @@ def parse_args(argv):
                            "no-op and is the default; the right value depends on "
                            "the movie and has to be judged on the panel "
                            "(default: %(default)s)")
+    play.add_argument("--bar-color", choices=sorted(BAR_COLORS),
+                      default=DEFAULT_BAR_COLOR,
+                      help="colour of the letterbox bars around the frame "
+                           "(default: %(default)s). 'gray' is near-black and, on "
+                           "this 1-bit panel, dithers to a black-and-white "
+                           "pattern rather than a solid tone")
     play.add_argument("--count-frames", action='store_true',
                       help="count frames exactly instead of trusting the "
                            "container. Decodes the whole movie, so it is slow, "

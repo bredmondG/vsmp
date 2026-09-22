@@ -31,9 +31,10 @@ def ground_truth_frame(movie, frame, info, out_path):
     """
     g = info['geometry']
     vf = ('select=gte(n\\,{n}),scale={w}:{h},'
-          'pad={pw}:{ph}:{px}:{py}:color=white,format=gray').format(
+          'pad={pw}:{ph}:{px}:{py}:color={color},format=gray').format(
         n=frame, w=g['width'], h=g['height'],
-        pw=vsmp.PANEL_W, ph=vsmp.PANEL_H, px=g['pad_x'], py=g['pad_y'])
+        pw=vsmp.PANEL_W, ph=vsmp.PANEL_H, px=g['pad_x'], py=g['pad_y'],
+        color=g['pad_color'])
     subprocess.run([
         'ffmpeg', '-y', '-nostdin', '-loglevel', 'error',
         '-i', str(movie), '-map', '0:v:0', '-vf', vf,
@@ -88,6 +89,15 @@ section("aspect-correct geometry (rec 26)")
 g = vsmp.panel_geometry(888, 480, Fraction(4920, 4921))
 check("1.85:1 film scales to 800x433 rather than stretching to 800x480",
       (g['width'], g['height']) == (800, 433), g)
+check("bars default to black", g['pad_color'] == 'black', g['pad_color'])
+check("explicit white bars are carried through",
+      vsmp.panel_geometry(888, 480, Fraction(4920, 4921),
+                          'white')['pad_color'] == 'white')
+check("gray maps to a near-black token, not mid grey",
+      vsmp.BAR_COLORS['gray'] == '0x1e1e1e', vsmp.BAR_COLORS['gray'])
+check("the three bar colours are the offered choices",
+      set(vsmp.BAR_COLORS) == {'black', 'white', 'gray'}, set(vsmp.BAR_COLORS))
+check("the default bar colour is black", vsmp.DEFAULT_BAR_COLOR == 'black')
 check("letterboxed by 23px top", (g['pad_x'], g['pad_y']) == (0, 23), g)
 check("image plus offset stays inside the panel",
       g['width'] + g['pad_x'] <= 800 and g['height'] + g['pad_y'] <= 480)
@@ -262,9 +272,22 @@ check("extracted PNG is grayscale, so no 'P' mode round trip (rec 27)",
       probe['pix_fmt'] == 'gray', probe['pix_fmt'])
 check("output is PNG, not JPEG (rec 28)",
       Path('m30.png').read_bytes()[:8] == b'\x89PNG\r\n\x1a\n')
-check("letterbox bars are white, not black",
-      Image.open('m30.png').getpixel((400, 2)) >= 250,
+check("letterbox bars are black by default",
+      Image.open('m30.png').getpixel((400, 2)) <= 5,
       Image.open('m30.png').getpixel((400, 2)))
+
+# The --bar-color option: re-probe the fixture asking for white bars and confirm
+# the same top-bar pixel comes back white instead. The 16:9 fixture letterboxes
+# top/bottom, so row 2 is inside the bar.
+info_white = vsmp.probe_video(SYNTH, bar_color='white')
+vsmp.extract_frame(SYNTH, Path('white_bars.png'), 30, info_white)
+check("--bar-color white paints the bars white",
+      Image.open('white_bars.png').getpixel((400, 2)) >= 250,
+      Image.open('white_bars.png').getpixel((400, 2)))
+check("the image content is unchanged by the bar colour, only the bars differ",
+      Image.open('white_bars.png').getpixel((400, 240))
+      == Image.open('m30.png').getpixel((400, 240)),
+      "centre pixel should be identical regardless of bar colour")
 
 # Past the end of the stream: ffmpeg exits 0 having written nothing, so this has
 # to be detected explicitly or it looks like a corrupt frame.
