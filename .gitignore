@@ -1,0 +1,26 @@
+# Runtime state. These are written by the player as it runs, so tracking them
+# means every `git pull` on the Pi conflicts with the live position.
+state.json
+state.json.tmp
+log.txt
+log.txt.*
+
+# Scratch space for the frame currently being displayed. One PNG at a time,
+# deleted after each frame, but leftovers appear if the player is killed.
+*_frames/
+
+# The previous state format. Still tracked in git history; ignored here so an
+# upgraded Pi does not keep reporting it as modified. See DEPLOY.md for why it
+# is not migrated.
+progress.pkl
+progress.pkl.tmp
+
+# Test artifacts. tests/fixtures holds a generated movie (rebuild with
+# `python3 tests/make_fixtures.py`), tests/work holds per-run scratch dirs.
+tests/fixtures/
+tests/work/
+tests_output.txt
+
+__pycache__/
+*.pyc
+.DS_Store

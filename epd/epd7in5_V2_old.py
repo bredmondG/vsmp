@@ -29,11 +29,23 @@
 
 
 import logging
+import time
 from . import epdconfig
 
 # Display resolution
 EPD_WIDTH       = 800
 EPD_HEIGHT      = 480
+
+# --- LOCAL PATCH (not upstream Waveshare code) -------------------------------
+# Bounds the BUSY wait in ReadBusy() below. Upstream polls with no sleep and no
+# timeout, which turns any panel fault into a silent, permanent hang.
+#
+# A full refresh on this 7.5" panel takes a few seconds, so 30s is a generous
+# ceiling that should never be reached in normal operation. If these timeouts
+# start firing during healthy playback, raise the value rather than removing it.
+BUSY_TIMEOUT_S = 30
+BUSY_POLL_MS = 20
+# -----------------------------------------------------------------------------
 
 logger = logging.getLogger(__name__)
 
@@ -228,12 +240,64 @@ class EPD:
         epdconfig.digital_write(self.cs_pin, 1)
 
     def ReadBusy(self):
-        logger.debug("e-Paper busy")
-        self.send_command(0x71)
-        busy = epdconfig.digital_read(self.busy_pin)
-        while(busy == 0):
+        """Block until the panel releases the BUSY line.
+
+        LOCAL PATCH -- this differs from upstream Waveshare code. Keep the
+        change clearly marked so a future driver update does not silently
+        revert it. Upstream was:
+
             self.send_command(0x71)
             busy = epdconfig.digital_read(self.busy_pin)
+            while(busy == 0):
+                self.send_command(0x71)
+                busy = epdconfig.digital_read(self.busy_pin)
+
+        Two problems with that, both fixed here.
+
+        1. No timeout. If the panel never released BUSY -- loose ribbon cable,
+           undervoltage, a panel glitch -- this looped forever and the whole
+           player hung inside it. Nothing crashed: the process stayed alive and
+           simply never showed another frame, which is why a restart-on-crash
+           supervisor could not recover from it and why the failure left no
+           trace in the log. Raising instead turns a silent hang into an
+           ordinary error that gets logged and can be restarted.
+
+        2. No sleep between polls. It re-sent the status command as fast as the
+           CPU allowed, pinning a core and saturating the SPI bus for the whole
+           refresh. Polling every BUSY_POLL_MS is plenty responsive.
+
+        This matters more than it looks: display_on_e_ink() in vsmp.py calls
+        init(), Clear(), display() and sleep() for every frame, and all four
+        reach this function. There are roughly four of these waits per frame.
+
+        Raises:
+            TimeoutError: if BUSY is still held after BUSY_TIMEOUT_S.
+        """
+        logger.debug("e-Paper busy")
+
+        # monotonic() rather than time(): it cannot be dragged backwards or
+        # forwards by an NTP correction. A Pi has no battery-backed clock, so it
+        # can take a large step adjustment shortly after boot, which would
+        # otherwise either break the deadline or trigger a spurious timeout.
+        deadline = time.monotonic() + BUSY_TIMEOUT_S
+
+        while True:
+            # 0x71 is "get status"; the panel answers on the BUSY pin.
+            self.send_command(0x71)
+            if epdconfig.digital_read(self.busy_pin) != 0:
+                break
+
+            if time.monotonic() >= deadline:
+                logger.error(
+                    "e-Paper BUSY still held after %ss, giving up. Check the "
+                    "ribbon cable seating and the power supply.", BUSY_TIMEOUT_S)
+                raise TimeoutError(
+                    "e-Paper panel did not release BUSY within "
+                    f"{BUSY_TIMEOUT_S}s")
+
+            epdconfig.delay_ms(BUSY_POLL_MS)
+
+        # Settle delay after BUSY release. Unchanged from upstream.
         epdconfig.delay_ms(20)
         logger.debug("e-Paper busy release")
         
