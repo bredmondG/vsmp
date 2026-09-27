@@ -170,7 +170,7 @@ check("final position persisted", final['frame'] == 60 and final['finished'] is 
 check("percent reached 100", abs(final['percent'] - 100.0) < 0.001, final['percent'])
 check("timecode advanced to the end of the movie",
       final['timecode'].startswith('00:00:02'), final['timecode'])
-check("next_frame_utc cleared once finished", final['next_frame_utc'] is None)
+check("next_frame_local cleared once finished", final['next_frame_local'] is None)
 check("no frame images left on disk",
       not list(Path('{}_frames'.format(SYNTH.stem)).glob('frame_*.png')))
 

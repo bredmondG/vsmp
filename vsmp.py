@@ -24,6 +24,9 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+LOCAL_TZ = ZoneInfo('America/Denver')
 from fractions import Fraction
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -53,6 +56,25 @@ LOG_BACKUP_COUNT = 5              # keep log.txt plus log.txt.1 ... log.txt.5
 # size guard in display_on_e_ink() for why that matters more than it looks.
 PANEL_W = 800
 PANEL_H = 480
+
+# Letterbox bar colour. The scaled frame rarely matches the panel's 1.667
+# aspect exactly, so panel_geometry() pads it out to 800x480 with bars on the
+# short axis. This maps the user-facing choice to the token ffmpeg's
+# `pad ... color=` accepts.
+#
+# A caveat that matters on this specific panel: it is 1-bit, and the driver's
+# getbuffer() runs the image through Floyd-Steinberg dithering (convert('1')).
+# Pure black and pure white survive that as solid bars. Anything in between
+# does not -- a mid grey dithers to a black-and-white checkerboard rather than
+# a solid tone. 'gray' is offered anyway, kept deliberately near-black so it
+# mostly rounds to black; it exists for grayscale panels and for anyone who
+# wants to judge it by eye, not because it renders as a clean grey here.
+BAR_COLORS = {
+    'black': 'black',
+    'white': 'white',
+    'gray': '0x1e1e1e',   # ~12% grey; on a 1-bit panel this dithers, see above
+}
+DEFAULT_BAR_COLOR = 'black'
 
 # The whole point of the project: 24 frames per hour, i.e. one every 150s.
 FRAMES_PER_HOUR = 24
@@ -125,10 +147,13 @@ def configure_logging():
     root.addHandler(handler)
 
 
-configure_logging()
-# A restart is the single most useful thing to be able to find in the log,
-# so mark it explicitly now that previous runs are no longer overwritten.
-logging.info('=== vsmp starting ===')
+# NOTE: logging is configured in main() on the play path, NOT here at import
+# time. configure_logging() opens log.txt for writing via RotatingFileHandler,
+# which is a side effect no importer should trigger just by `import vsmp`. The
+# status CLI does not need it (it is a pure read), and neither does the web
+# server (webapp.py imports this module to reuse read_state/summarize_state and
+# must not open -- let alone require write access to -- the player's log file).
+# See main().
 
 # --- systemd watchdog --------------------------------------------------------
 #
@@ -397,7 +422,7 @@ def frame_timestamp(frame, fps):
     return ts
 
 
-def panel_geometry(width, height, sar):
+def panel_geometry(width, height, sar, bar_color=DEFAULT_BAR_COLOR):
     """Work out the scale-and-letterbox geometry for this movie.
 
     Recommendation 26. The old code did ``im.resize((800, 480))``, which
@@ -413,6 +438,11 @@ def panel_geometry(width, height, sar):
     especially) can have a SAR far from 1:1. Correcting for SAR here also keeps
     the ffmpeg command free of nested filter expressions and makes the geometry
     loggable and testable.
+
+    ``bar_color`` names the letterbox fill (see BAR_COLORS). It is resolved to
+    an ffmpeg colour token here and carried through the geometry dict as
+    ``pad_color`` so extract_frame() stays free of a separate colour argument --
+    everything the ffmpeg pad filter needs already flows through this dict.
     """
     display_w = Fraction(width) * (sar or Fraction(1))
     display_h = Fraction(height)
@@ -428,10 +458,11 @@ def panel_geometry(width, height, sar):
         'pad_x': (PANEL_W - out_w) // 2,
         'pad_y': (PANEL_H - out_h) // 2,
         'display_aspect': float(display_w / display_h),
+        'pad_color': BAR_COLORS[bar_color],
     }
 
 
-def probe_video(movie, count_frames=False):
+def probe_video(movie, count_frames=False, bar_color=DEFAULT_BAR_COLOR):
     """Read frame rate, duration, geometry and total frame count, once.
 
     Recommendation 23. The old ``frame_count()`` shelled out to ffprobe for
@@ -527,7 +558,7 @@ def probe_video(movie, count_frames=False):
     if total <= 0:
         raise RuntimeError("Refusing to play {}: computed {} frames".format(movie, total))
 
-    geometry = panel_geometry(width, height, sar)
+    geometry = panel_geometry(width, height, sar, bar_color)
     info = {
         'fps': fps,
         'duration_s': duration,
@@ -542,10 +573,11 @@ def probe_video(movie, count_frames=False):
 
     logging.info(
         "Probed %s: %dx%d sar=%s dar=%.4f fps=%s (%.4f) duration=%s "
-        "frames=%d (%s) -> scaling to %dx%d padded to %dx%d",
+        "frames=%d (%s) -> scaling to %dx%d padded to %dx%d with %s bars",
         movie.name, width, height, sar, geometry['display_aspect'],
         fps, float(fps), format_timecode(duration), total, source,
-        geometry['width'], geometry['height'], PANEL_W, PANEL_H)
+        geometry['width'], geometry['height'], PANEL_W, PANEL_H,
+        geometry['pad_color'])
     return info
 
 
@@ -595,11 +627,12 @@ def extract_frame(movie, out_path, frame, info):
     timestamp = format_seconds(frame_timestamp(frame, info['fps']))
     video_filter = (
         'scale={w}:{h},'
-        'pad={pw}:{ph}:{px}:{py}:color=white,'
+        'pad={pw}:{ph}:{px}:{py}:color={color},'
         'format=gray'
     ).format(w=geometry['width'], h=geometry['height'],
              pw=PANEL_W, ph=PANEL_H,
-             px=geometry['pad_x'], py=geometry['pad_y'])
+             px=geometry['pad_x'], py=geometry['pad_y'],
+             color=geometry['pad_color'])
 
     run_tool([
         'ffmpeg', '-y', '-nostdin',
@@ -629,8 +662,8 @@ def extract_frame(movie, out_path, frame, info):
 # --- state -------------------------------------------------------------------
 
 
-def utc_now_iso():
-    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+def local_now_iso():
+    return datetime.now(LOCAL_TZ).strftime('%Y-%m-%dT%H:%M:%S%z')
 
 
 def new_state(movie_name, info):
@@ -658,9 +691,9 @@ def new_state(movie_name, info):
         'percent': 0.0,
         'timecode': '00:00:00.000',
         'finished': False,
-        'last_frame_utc': None,
-        'next_frame_utc': None,
-        'run_started_utc': utc_now_iso(),
+        'last_frame_local': None,
+        'next_frame_local': None,
+        'run_started_local': local_now_iso(),
         'frames_this_run': 0,
         'last_extract_s': None,
         'last_display_s': None,
@@ -819,7 +852,7 @@ def load_state(path, movie_name, info, restart=False):
     # Fields added by later versions, so a hand-edited or older file still works.
     for key, value in new_state(movie_name, info).items():
         state.setdefault(key, value)
-    state['run_started_utc'] = utc_now_iso()
+    state['run_started_local'] = local_now_iso()
     state['frames_this_run'] = 0
 
     logging.info("Resuming %s at frame %d of %d (%.2f%%)",
@@ -1078,7 +1111,7 @@ def play_movie(epd, movie, state_path, state, info, contrast):
         position_s = float(Fraction(state['frame']) / info['fps'])
         state['timecode'] = format_timecode(position_s)
         state['percent'] = round(100.0 * state['frame'] / max(1, total), 4)
-        state['last_frame_utc'] = utc_now_iso()
+        state['last_frame_local'] = local_now_iso()
         state['last_extract_s'] = round(extract_s, 3) if extract_s is not None else None
         state['last_display_s'] = round(display_s, 3) if display_s is not None else None
 
@@ -1104,9 +1137,9 @@ def play_movie(epd, movie, state_path, state, info, contrast):
                 behind, frame)
             next_deadline = now_monotonic + FRAME_INTERVAL_S
 
-        state['next_frame_utc'] = datetime.fromtimestamp(
-            time.time() + (next_deadline - time.monotonic()), timezone.utc
-        ).strftime('%Y-%m-%dT%H:%M:%SZ')
+        state['next_frame_local'] = datetime.fromtimestamp(
+            time.time() + (next_deadline - time.monotonic()), LOCAL_TZ
+        ).strftime('%Y-%m-%dT%H:%M:%S%z')
 
         if state['frame'] >= total:
             state['finished'] = True
@@ -1152,7 +1185,7 @@ def play_movie(epd, movie, state_path, state, info, contrast):
             state['frame'], total, state['percent'], state['timecode'],
             'skip' if extract_s is None else '{:.2f}'.format(extract_s),
             'skip' if display_s is None else '{:.2f}'.format(display_s),
-            state['next_frame_utc'], state['errors'], state['anomalies'])
+            state['next_frame_local'], state['errors'], state['anomalies'])
 
         if state['frame'] >= total:
             break
@@ -1160,7 +1193,7 @@ def play_movie(epd, movie, state_path, state, info, contrast):
         sleep_until(next_deadline)
 
     state['finished'] = True
-    state['next_frame_utc'] = None
+    state['next_frame_local'] = None
     save_state(state_path, state)
     logging.info("Movie finished at frame %d of %d (%d errors, %d anomalies)",
                  state['frame'], state['total_frames'],
@@ -1171,6 +1204,65 @@ def play_movie(epd, movie, state_path, state, info, contrast):
 # --- subcommands -------------------------------------------------------------
 
 
+def read_state(state_path=STATE_FILE):
+    """Load and parse the state file, or return None if it does not exist.
+
+    Reads only, and the player writes state.json atomically, so this is safe to
+    call at any time -- including from another process such as the web server
+    (see webapp.py), which is why this is a standalone function rather than
+    being inlined in cmd_status.
+    """
+    target = Path(state_path)
+    if not target.exists():
+        return None
+    with open(target) as f:
+        return json.load(f)
+
+
+def summarize_state(state):
+    """Turn a raw state dict into the derived, display-ready summary.
+
+    This is the single source of truth for "where is the player, in numbers a
+    human cares about": percent, frame counts, timecodes and the remaining-time
+    estimate. cmd_status prints from it and the web server renders from it, so
+    the CLI and the web page can never drift apart. Pure and side-effect free;
+    give it a dict, get a dict back.
+    """
+    total = state.get('total_frames') or 0
+    frame = state.get('frame') or 0
+    finished = bool(state.get('finished'))
+
+    summary = {
+        'movie': state.get('movie'),
+        'frame': frame,
+        'total_frames': total,
+        'percent': state.get('percent', 0.0),
+        'timecode': state.get('timecode'),
+        'duration': format_timecode(state.get('duration_s') or 0),
+        'duration_s': state.get('duration_s') or 0,
+        'state': 'finished' if finished else 'playing',
+        'finished': finished,
+        'last_frame_local': state.get('last_frame_local') or 'never',
+        'next_frame_local': state.get('next_frame_local') or 'not scheduled',
+        'frames_this_run': state.get('frames_this_run', 0),
+        'run_started_local': state.get('run_started_local'),
+        'last_extract_s': state.get('last_extract_s'),
+        'last_display_s': state.get('last_display_s'),
+        'errors': state.get('errors', 0),
+        'anomalies': state.get('anomalies', 0),
+        'remaining_frames': None,
+        'remaining_days': None,
+        'frames_per_hour': FRAMES_PER_HOUR,
+    }
+
+    if total and not finished:
+        remaining_frames = total - frame
+        summary['remaining_frames'] = remaining_frames
+        summary['remaining_days'] = remaining_frames / FRAMES_PER_HOUR / 24
+
+    return summary
+
+
 def cmd_status(args):
     """Print the current position (recommendation 11).
 
@@ -1179,46 +1271,39 @@ def cmd_status(args):
     log. Reads only; safe to run while the player is going, because state writes
     are atomic.
     """
-    target = Path(args.state)
-    if not target.exists():
-        print("No {} yet -- the player has not written a frame.".format(target))
+    state = read_state(args.state)
+    if state is None:
+        print("No {} yet -- the player has not written a frame.".format(args.state))
         if Path(LEGACY_STATE_FILE).exists():
             print("(An old {} is present. It is not used by this version.)"
                   .format(LEGACY_STATE_FILE))
         return 1
 
-    with open(target) as f:
-        state = json.load(f)
-
     if args.json:
         print(json.dumps(state, indent=2, sort_keys=True))
         return 0
 
-    total = state.get('total_frames') or 0
-    frame = state.get('frame') or 0
+    s = summarize_state(state)
     width = 40
-    filled = int(width * frame / total) if total else 0
+    filled = int(width * s['frame'] / s['total_frames']) if s['total_frames'] else 0
 
-    print("movie      {}".format(state.get('movie')))
+    print("movie      {}".format(s['movie']))
     print("progress   [{}{}] {:.3f}%".format('#' * filled, '.' * (width - filled),
-                                             state.get('percent', 0.0)))
-    print("frame      {} of {}".format(frame, total))
-    print("timecode   {} of {}".format(
-        state.get('timecode'), format_timecode(state.get('duration_s') or 0)))
-    print("state      {}".format('finished' if state.get('finished') else 'playing'))
-    print("last frame {}".format(state.get('last_frame_utc') or 'never'))
-    print("next frame {}".format(state.get('next_frame_utc') or 'not scheduled'))
+                                             s['percent']))
+    print("frame      {} of {}".format(s['frame'], s['total_frames']))
+    print("timecode   {} of {}".format(s['timecode'], s['duration']))
+    print("state      {}".format(s['state']))
+    print("last frame {}".format(s['last_frame_local']))
+    print("next frame {}".format(s['next_frame_local']))
     print("this run   {} frames since {}".format(
-        state.get('frames_this_run', 0), state.get('run_started_utc')))
+        s['frames_this_run'], s['run_started_local']))
     print("last frame took  extract {}s, display {}s".format(
-        state.get('last_extract_s'), state.get('last_display_s')))
-    print("errors     {}   anomalies {}".format(
-        state.get('errors', 0), state.get('anomalies', 0)))
+        s['last_extract_s'], s['last_display_s']))
+    print("errors     {}   anomalies {}".format(s['errors'], s['anomalies']))
 
-    if total and not state.get('finished'):
-        remaining_hours = (total - frame) / FRAMES_PER_HOUR
+    if s['remaining_frames'] is not None:
         print("remaining  {} frames, about {:.1f} days at {} frames/hour".format(
-            total - frame, remaining_hours / 24, FRAMES_PER_HOUR))
+            s['remaining_frames'], s['remaining_days'], s['frames_per_hour']))
     return 0
 
 
@@ -1244,7 +1329,8 @@ def cmd_play(args):
 
     configure_watchdog()
 
-    info = probe_video(movie, count_frames=args.count_frames)
+    info = probe_video(movie, count_frames=args.count_frames,
+                       bar_color=args.bar_color)
     state = load_state(args.state, movie_name, info, restart=args.restart)
 
     if state['finished'] and not args.restart:
@@ -1282,6 +1368,12 @@ def parse_args(argv):
                            "no-op and is the default; the right value depends on "
                            "the movie and has to be judged on the panel "
                            "(default: %(default)s)")
+    play.add_argument("--bar-color", choices=sorted(BAR_COLORS),
+                      default=DEFAULT_BAR_COLOR,
+                      help="colour of the letterbox bars around the frame "
+                           "(default: %(default)s). 'gray' is near-black and, on "
+                           "this 1-bit panel, dithers to a black-and-white "
+                           "pattern rather than a solid tone")
     play.add_argument("--count-frames", action='store_true',
                       help="count frames exactly instead of trusting the "
                            "container. Decodes the whole movie, so it is slow, "
@@ -1328,9 +1420,19 @@ def main(argv):
     args = parse_args(argv)
 
     # `status` reads a file and prints it. It must not touch the panel, and it
-    # must not be caught by the display cleanup below.
+    # must not be caught by the display cleanup below. It also does not set up
+    # file logging: it is a pure read, and configuring the RotatingFileHandler
+    # would open log.txt for writing for no reason.
     if args.func is cmd_status:
         return cmd_status(args)
+
+    # Only the player writes a log. Configure it here rather than at import
+    # time so that importing this module (e.g. from the web server) has no
+    # side effects. A restart is the single most useful thing to find in the
+    # log, so mark it explicitly now that previous runs are no longer
+    # overwritten (configure_logging appends rather than truncates).
+    configure_logging()
+    logging.info('=== vsmp starting ===')
 
     try:
         return cmd_play(args)

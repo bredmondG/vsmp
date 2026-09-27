@@ -25,8 +25,10 @@ is only meaningful while the stub fails the same way the hardware does. Keep the
 two in sync.
 
 `harness.py` must be imported **before** `vsmp`, because it `chdir`s into a
-scratch directory first and `vsmp` writes `log.txt` relative to the working
-directory at import time. Every module starts:
+scratch directory first (and puts the panel stub on the path). Importing `vsmp`
+no longer writes anything itself, but the player tests write `log.txt` and
+`state.json` relative to the working directory, so the chdir keeps them out of
+the repo. Every module starts:
 
 ```python
 import harness
