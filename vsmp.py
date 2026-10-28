@@ -99,6 +99,26 @@ STATE_FILE = 'state.json'
 STATE_SCHEMA = 2
 LEGACY_STATE_FILE = 'progress.pkl'
 
+# The image-queue directory (IMAGE-QUEUE-DESIGN.md sections 3-5). The webapp
+# drops finished, panel-ready PNGs here and the player claims them one per tick.
+# Overridable by the VSMP_QUEUE environment variable so the player and the web
+# server can be pointed at the same directory from systemd env files; the
+# `play --queue-dir` option overrides it again on the command line, mirroring
+# how --state is plumbed. Published files live directly in the directory; two
+# dotfile subdirs carry work-in-progress state:
+#   <queue>/            -- published *.png, claimed oldest-first (FIFO by name)
+#   <queue>/.incoming/  -- the webapp's mid-conversion temp files (not ours)
+#   <queue>/.showing/   -- a file the player has claimed and is displaying
+QUEUE_DIR = os.environ.get('VSMP_QUEUE', 'queue')
+
+# Disposal of a shown image (IMAGE-QUEUE-DESIGN.md section 3a). Default is to
+# delete it after its tick so nothing accumulates on the SD card over a
+# months-long run. If VSMP_ARCHIVE_DIR is set, shown images are moved there
+# instead and the archive is pruned to the most recent VSMP_ARCHIVE_MAX files,
+# so retention is always bounded -- there is no unbounded-keep option by design.
+ARCHIVE_DIR = os.environ.get('VSMP_ARCHIVE_DIR')
+ARCHIVE_MAX_DEFAULT = 50
+
 # Recommendation 7. How many frames may fail back-to-back before we treat the
 # problem as systemic rather than as a run of bad luck. Ten failures at one frame
 # per 150s is about 25 minutes of a blank screen, which is long enough to rule
@@ -462,6 +482,29 @@ def panel_geometry(width, height, sar, bar_color=DEFAULT_BAR_COLOR):
     }
 
 
+def panel_video_filter(geometry):
+    """Build the ffmpeg -vf string that scales, letterboxes and grays a source.
+
+    Factored out of extract_frame() so the exact same filter can be reused to
+    convert an arbitrary uploaded image (see convert_image_to_panel_png() and
+    IMAGE-QUEUE-DESIGN.md section 4). Keeping one implementation means the panel
+    only ever sees frames and uploads prepared the same way: scaled to fit,
+    padded to exactly PANEL_W x PANEL_H with the chosen bar colour, and reduced
+    to grayscale so the only mode change left is the driver's 1-bit dither.
+
+    ``geometry`` is the dict returned by panel_geometry(): it carries the scaled
+    width/height, the pad offsets, and the resolved ffmpeg ``pad_color`` token.
+    """
+    return (
+        'scale={w}:{h},'
+        'pad={pw}:{ph}:{px}:{py}:color={color},'
+        'format=gray'
+    ).format(w=geometry['width'], h=geometry['height'],
+             pw=PANEL_W, ph=PANEL_H,
+             px=geometry['pad_x'], py=geometry['pad_y'],
+             color=geometry['pad_color'])
+
+
 def probe_video(movie, count_frames=False, bar_color=DEFAULT_BAR_COLOR):
     """Read frame rate, duration, geometry and total frame count, once.
 
@@ -625,14 +668,7 @@ def extract_frame(movie, out_path, frame, info):
     """
     geometry = info['geometry']
     timestamp = format_seconds(frame_timestamp(frame, info['fps']))
-    video_filter = (
-        'scale={w}:{h},'
-        'pad={pw}:{ph}:{px}:{py}:color={color},'
-        'format=gray'
-    ).format(w=geometry['width'], h=geometry['height'],
-             pw=PANEL_W, ph=PANEL_H,
-             px=geometry['pad_x'], py=geometry['pad_y'],
-             color=geometry['pad_color'])
+    video_filter = panel_video_filter(geometry)
 
     run_tool([
         'ffmpeg', '-y', '-nostdin',
@@ -657,6 +693,199 @@ def extract_frame(movie, out_path, frame, info):
             "target is past the end of the stream".format(timestamp, frame))
 
     return timestamp
+
+
+def convert_image_to_panel_png(src_path, out_path):
+    """Convert an arbitrary uploaded image into an 800x480 grayscale panel PNG.
+
+    This is the webapp's half of the image queue (IMAGE-QUEUE-DESIGN.md section
+    4), but it lives here, in the player module, so that the uploaded image is
+    prepared with the *exact same* scale/letterbox/grayscale filter the movie
+    frames use (panel_video_filter) -- the two can never drift. webapp.py
+    imports and calls this; it must therefore never import the e-paper driver
+    (and it does not -- the driver import is lazy, inside the play path only).
+
+    Phone photos are large and frequently HEIC/HEIF, which Pillow cannot open
+    without an extra plugin. ffmpeg -- already a dependency of the player and
+    the tests -- reads HEIC/JPEG/PNG/WebP uniformly, so it does the decode.
+
+    The source's own pixel dimensions are probed with ffprobe, then geometry is
+    computed with square pixels (SAR 1:1) and a white letterbox, per the design
+    doc: an uploaded image carries no meaningful SAR, and white bars read as
+    deliberate matting rather than a fault on the panel. One ffmpeg pass writes
+    the 800x480 grayscale PNG that passes display_on_e_ink()'s size guard.
+
+    Validation is "did ffmpeg accept it and produce a non-empty PNG" rather
+    than trusting the uploaded extension or MIME type: on any failure the caller
+    gets an exception and nothing is published to the queue.
+    """
+    src = Path(src_path)
+    out = Path(out_path)
+
+    raw = run_tool([
+        'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height',
+        '-of', 'json', str(src),
+    ], FFPROBE_TIMEOUT_S, 'ffprobe image probe')
+
+    parsed = json.loads(raw)
+    streams = parsed.get('streams') or []
+    if not streams:
+        raise RuntimeError(
+            "{} has no image/video stream that ffprobe can see".format(src))
+    stream = streams[0]
+    try:
+        width = int(stream['width'])
+        height = int(stream['height'])
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeError("Could not read image dimensions from {}".format(src))
+
+    # Square pixels and a white letterbox (design doc section 4). panel_geometry
+    # resolves the bar colour to the ffmpeg token carried on the dict, so the
+    # same panel_video_filter() used for movie frames applies unchanged.
+    geometry = panel_geometry(width, height, sar=Fraction(1), bar_color='white')
+    video_filter = panel_video_filter(geometry)
+
+    run_tool([
+        'ffmpeg', '-y', '-nostdin',
+        '-i', str(src),
+        '-map', '0:v:0',
+        '-frames:v', '1',
+        '-update', '1',
+        '-vf', video_filter,
+        '-f', 'image2',
+        str(out),
+    ], FFMPEG_TIMEOUT_S, 'ffmpeg image convert')
+
+    if not out.exists() or out.stat().st_size == 0:
+        raise RuntimeError(
+            "ffmpeg produced a non-empty PNG for {}: the conversion wrote "
+            "nothing, so the upload is not a usable image".format(src))
+
+    return out
+
+
+# --- the image queue ---------------------------------------------------------
+
+
+def queue_paths(queue_dir):
+    """Return (queue, incoming, showing) Paths, creating all three.
+
+    The two work subdirs are dotfiles so a plain glob('*.png') on the queue dir
+    never picks them up (IMAGE-QUEUE-DESIGN.md section 3):
+      <queue>/.incoming/  -- the webapp's mid-conversion temp files
+      <queue>/.showing/   -- a file the player has claimed and is displaying
+    """
+    queue = Path(queue_dir)
+    incoming = queue / '.incoming'
+    showing = queue / '.showing'
+    for d in (queue, incoming, showing):
+        d.mkdir(parents=True, exist_ok=True)
+    return queue, incoming, showing
+
+
+def list_queue(queue_dir):
+    """Published *.png in the queue, sorted into FIFO (lexical-name) order.
+
+    Only files directly in <queue>/ count. The .incoming/ and .showing/ subdirs
+    are dotfiles, so glob('*.png') already excludes them -- files mid-conversion
+    or mid-display must never inflate the published count the webapp shows.
+    """
+    queue = Path(queue_dir)
+    if not queue.exists():
+        return []
+    return sorted(queue.glob('*.png'))
+
+
+def claim_next_image(queue_dir):
+    """Atomically take ownership of the oldest published image, or None.
+
+    Claim is a rename out of <queue>/ into <queue>/.showing/ (design doc section
+    3): os.rename within one filesystem is atomic, so even a hypothetical second
+    consumer could not show the same file twice -- exactly one rename wins. The
+    FileNotFoundError race (another consumer, or a human, won the file between
+    the listing and the rename) is tolerated by moving on to the next candidate
+    rather than failing the tick.
+
+    Returns the Path of the claimed file under .showing/, or None if the queue
+    drained before anything could be claimed.
+    """
+    _, _, showing = queue_paths(queue_dir)
+    for candidate in list_queue(queue_dir):
+        target = showing / candidate.name
+        try:
+            os.rename(candidate, target)
+        except FileNotFoundError:
+            # Someone else claimed this one between the listing and the rename.
+            continue
+        return target
+    return None
+
+
+def dispose_shown_image(path):
+    """Dispose of an image after its tick: delete, or archive if configured.
+
+    Default (design doc section 3a): delete the work file so nothing piles up on
+    the SD card. If VSMP_ARCHIVE_DIR is set, move the file there instead and
+    prune the archive to the most recent VSMP_ARCHIVE_MAX files (default
+    ARCHIVE_MAX_DEFAULT) by sorted name, so the archive is always capped.
+    """
+    path = Path(path)
+    if not ARCHIVE_DIR:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logging.exception("Could not delete the shown image %s", path)
+        return
+
+    archive = Path(ARCHIVE_DIR)
+    archive.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(path, archive / path.name)
+    except OSError:
+        logging.exception("Could not archive the shown image %s, deleting it", path)
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return
+
+    try:
+        cap = int(os.environ.get('VSMP_ARCHIVE_MAX', ARCHIVE_MAX_DEFAULT))
+    except ValueError:
+        cap = ARCHIVE_MAX_DEFAULT
+    if cap < 0:
+        cap = ARCHIVE_MAX_DEFAULT
+    kept = sorted(archive.glob('*.png'))
+    for stale in kept[:-cap] if cap else kept:
+        try:
+            stale.unlink()
+        except OSError:
+            logging.warning("Could not prune archived image %s", stale)
+
+
+def sweep_showing(queue_dir):
+    """Delete any leftover files under <queue>/.showing/ at startup.
+
+    A file in .showing/ was already claimed, so a previous player either showed
+    it (and crashed before disposing of it) or died mid-display. Either way it
+    must never be re-shown -- re-showing a claimed file would repeat an image
+    that already had its tick. This mirrors clean_frame_dir()'s startup sweep of
+    stale movie frames (design doc section 3).
+    """
+    _, _, showing = queue_paths(queue_dir)
+    removed = 0
+    for stale in showing.iterdir():
+        try:
+            if stale.is_file():
+                stale.unlink()
+                removed += 1
+        except OSError:
+            logging.warning("Could not remove leftover claimed image %s", stale)
+    if removed:
+        logging.info("Cleared %d leftover claimed image(s) from %s", removed, showing)
 
 
 # --- state -------------------------------------------------------------------
@@ -699,6 +928,7 @@ def new_state(movie_name, info):
         'last_display_s': None,
         'errors': 0,
         'anomalies': 0,
+        'images_shown': 0,
     }
 
 
@@ -1018,7 +1248,7 @@ def clean_frame_dir(frames_dir):
 # --- the frame loop ----------------------------------------------------------
 
 
-def play_movie(epd, movie, state_path, state, info, contrast):
+def play_movie(epd, movie, state_path, state, info, contrast, queue_dir=QUEUE_DIR):
     """Display the movie one frame at a time, in order, at 24 frames per hour.
 
     Recommendation 15: one loop over the single source file, from
@@ -1028,10 +1258,25 @@ def play_movie(epd, movie, state_path, state, info, contrast):
     each of twenty sections.
 
     Recommendation 24: the schedule is anchored to absolute deadlines.
+
+    Image queue (IMAGE-QUEUE-DESIGN.md sections 3-5). At the top of every tick,
+    before extracting a movie frame, the loop checks the queue. If an uploaded,
+    panel-ready PNG is waiting it is shown for this one tick and the movie frame
+    counter is NOT advanced -- the film resumes from exactly where it paused.
+    The queue check runs every tick regardless of whether the movie still has
+    frames left, so uploads keep displaying after the film ends: the loop
+    continues while there is movie left OR the queue is non-empty. See the
+    FEAT-001 findings for the exact loop-shape decision.
     """
     frames_dir = Path('{}_frames'.format(movie.stem))
     frames_dir.mkdir(parents=True, exist_ok=True)
     clean_frame_dir(frames_dir)
+
+    # Clear any image a previous player claimed but did not finish disposing of,
+    # mirroring clean_frame_dir() above. A claimed file has already had its
+    # tick (or lost its player mid-display) and must never be re-shown.
+    queue_paths(queue_dir)
+    sweep_showing(queue_dir)
 
     total = state['total_frames']
     consecutive_errors = 0
@@ -1047,7 +1292,63 @@ def play_movie(epd, movie, state_path, state, info, contrast):
     # which would otherwise skew or collapse the schedule.
     next_deadline = time.monotonic()
 
-    while state['frame'] < total:
+    # Loop while the movie has frames left OR the queue is non-empty, so
+    # uploaded images keep being serviced after the film finishes (design doc
+    # section: "Ensure images are still serviced when the movie is finished").
+    # The no-queue, finished-movie case still returns early from cmd_play before
+    # we ever get here, so that behaviour is unchanged.
+    while state['frame'] < total or list_queue(queue_dir):
+        # --- top-of-tick queue check (IMAGE-QUEUE-DESIGN.md section 3-5) ------
+        #
+        # Claim the oldest published image, if any. When one is claimed we show
+        # it for this single tick and do NOT advance state['frame'] or touch any
+        # movie frame field: the film pauses exactly where it is and resumes on
+        # the next empty-queue tick. The schedule, watchdog and disposal are all
+        # honoured exactly as the movie path honours them, so an image tick
+        # costs the same 150s slot and keeps the watchdog honest.
+        claimed = claim_next_image(queue_dir)
+        if claimed is not None:
+            try:
+                image = prepare_for_panel(claimed, contrast)
+                display_on_e_ink(epd, image)
+                state['images_shown'] = state.get('images_shown', 0) + 1
+            finally:
+                # Always dispose, including on a display failure: a claimed file
+                # has already left the queue and must not be re-shown.
+                dispose_shown_image(claimed)
+
+            # Advance the deadline exactly like the movie path, with the same
+            # behind-schedule re-anchoring, so the cadence never sprints.
+            next_deadline += FRAME_INTERVAL_S
+            now_monotonic = time.monotonic()
+            behind = now_monotonic - next_deadline
+            if behind > 0:
+                logging.warning(
+                    "Behind schedule by %.1fs after an image tick. Not skipping; "
+                    "re-anchoring the schedule so the backlog is not raced through.",
+                    behind)
+                next_deadline = now_monotonic + FRAME_INTERVAL_S
+
+            state['next_frame_local'] = datetime.fromtimestamp(
+                time.time() + (next_deadline - time.monotonic()), LOCAL_TZ
+            ).strftime('%Y-%m-%dT%H:%M:%S%z')
+            save_state(state_path, state)
+
+            logging.info("image=%s images_shown=%d next=%s",
+                         claimed.name, state['images_shown'],
+                         state['next_frame_local'])
+
+            watchdog_ping()
+            sleep_until(next_deadline)
+            continue
+
+        # No queued image: the movie either has a frame to show or (if it is
+        # finished) the loop only reached here because the queue was non-empty a
+        # moment ago and has since drained -- fall through and let the while
+        # condition end the loop.
+        if state['frame'] >= total:
+            break
+
         frame = state['frame']
 
         extract_s = display_s = None
@@ -1250,6 +1551,7 @@ def summarize_state(state):
         'last_display_s': state.get('last_display_s'),
         'errors': state.get('errors', 0),
         'anomalies': state.get('anomalies', 0),
+        'images_shown': state.get('images_shown', 0),
         'remaining_frames': None,
         'remaining_days': None,
         'frames_per_hour': FRAMES_PER_HOUR,
@@ -1300,6 +1602,7 @@ def cmd_status(args):
     print("last frame took  extract {}s, display {}s".format(
         s['last_extract_s'], s['last_display_s']))
     print("errors     {}   anomalies {}".format(s['errors'], s['anomalies']))
+    print("images shown {}".format(s['images_shown']))
 
     if s['remaining_frames'] is not None:
         print("remaining  {} frames, about {:.1f} days at {} frames/hour".format(
@@ -1347,7 +1650,8 @@ def cmd_play(args):
     logging.info("init and Clear")
     epd.init()
     epd.Clear()
-    play_movie(epd, movie, args.state, state, info, args.contrast)
+    play_movie(epd, movie, args.state, state, info, args.contrast,
+               queue_dir=args.queue_dir)
     logging.info("Finished!")
     return 0
 
@@ -1361,6 +1665,11 @@ def parse_args(argv):
     play.add_argument("filename", help="the movie file, e.g. movie.mp4")
     play.add_argument("--state", default=STATE_FILE,
                      help="where to keep the position (default: %(default)s)")
+    play.add_argument("--queue-dir", default=QUEUE_DIR,
+                      help="directory of uploaded panel-ready PNGs to show, one "
+                           "per tick, ahead of the movie frame. Must be the same "
+                           "directory the web server writes to "
+                           "(default: %(default)s, or the VSMP_QUEUE env var)")
     play.add_argument("--restart", action='store_true',
                       help="ignore any saved position and start from frame 0")
     play.add_argument("--contrast", type=float, default=1.0,

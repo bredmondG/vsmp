@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
-MODULES = ['test_extract', 'test_state_loop', 'test_e2e', 'test_watchdog']
+MODULES = ['test_extract', 'test_state_loop', 'test_e2e', 'test_queue', 'test_watchdog']
 
 RESULT = re.compile(r'HARNESS_RESULT pass=(\d+) fail=(\d+) skip=(\d+)')
 
