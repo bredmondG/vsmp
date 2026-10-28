@@ -101,3 +101,26 @@ footer {
 
 a { color: var(--accent); }
 code { background: var(--bar-bg); padding: 0.1rem 0.35rem; border-radius: 5px; }
+
+.upload {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin: 1.25rem 0;
+}
+
+.upload input[type="file"] { color: var(--muted); flex: 1 1 12rem; }
+
+.upload button {
+  padding: 0.5rem 1.1rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.queue-list { margin: 0.25rem 0 0; padding-left: 1.5rem; }

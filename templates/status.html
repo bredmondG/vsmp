@@ -46,6 +46,7 @@
 
     <footer class="muted small">
       {% if refresh and summary %}auto-refreshing every {{ refresh }}s ·{% endif %}
+      <a href="{{ url_for('upload') }}">add an image</a> ·
       <a href="{{ url_for('status_json') }}">status.json</a>
     </footer>
   </main>

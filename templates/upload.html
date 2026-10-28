@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Add an image — Very Slow Movie Player</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="card">
+    <h1>Add an image</h1>
+
+    {# --- what the VSMP is ------------------------------------------------ #}
+    <p class="muted small">
+      This is a <strong>very slow movie player</strong>. It shows one frame of a
+      film on an e-paper panel every 150 seconds — 24 frames an hour. It is made
+      to be glanced at, like a picture on the wall that barely moves.
+    </p>
+
+    {# --- what happens to an uploaded image ------------------------------- #}
+    <p class="muted small">
+      Your picture joins a first-in, first-out queue. When its turn comes it is
+      shown for one 150-second slot, then the film carries on where it paused —
+      an upload never interrupts the image already on screen. Pictures are
+      converted to grayscale and scaled to fit the panel, with white bars if the
+      shape does not match. When the queue is empty, the movie just keeps
+      playing.
+    </p>
+
+    {% if error %}
+      <p class="percent state state-finished" role="alert">{{ error }}</p>
+    {% elif landed_position is not none %}
+      <p class="percent">
+        Added
+        <span class="state state-playing">{{ landed_position }}{{
+          'st' if landed_position % 10 == 1 and landed_position != 11 else
+          'nd' if landed_position % 10 == 2 and landed_position != 12 else
+          'rd' if landed_position % 10 == 3 and landed_position != 13 else
+          'th' }} in line</span>
+      </p>
+    {% endif %}
+
+    {# --- the queue length + estimated wait ------------------------------- #}
+    {% if queue.length == 0 %}
+      <p class="percent">Queue is empty — the movie is playing</p>
+    {% else %}
+      <dl class="facts">
+        <dt>in the queue</dt>
+        <dd>{{ queue.length }} image{{ 's' if queue.length != 1 else '' }}</dd>
+        <dt>estimated wait</dt>
+        <dd>about {{ '%.1f'|format(queue.wait_minutes) }} min</dd>
+      </dl>
+    {% endif %}
+
+    {# --- the upload form -------------------------------------------------- #}
+    <form class="upload" method="post" action="{{ url_for('upload') }}"
+          enctype="multipart/form-data">
+      <input type="file" name="image" accept="image/*" required>
+      <button type="submit">Add to the queue</button>
+    </form>
+
+    {# --- the current queue, so a visitor sees roughly where they land ---- #}
+    {% if queue.length > 0 %}
+      <p class="muted small">Waiting now, oldest first:</p>
+      <ol class="queue-list small muted">
+        {% for name in queue.names %}
+          <li>{{ loop.index }}</li>
+        {% endfor %}
+      </ol>
+    {% endif %}
+
+    <footer class="muted small">
+      <a href="{{ url_for('index') }}">← back to status</a> ·
+      <a href="{{ url_for('queue_json') }}">queue.json</a>
+    </footer>
+  </main>
+</body>
+</html>
