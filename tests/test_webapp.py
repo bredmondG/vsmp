@@ -19,7 +19,6 @@ written into the repo.
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -135,37 +134,93 @@ for p in published_pngs():
 
 
 # ---------------------------------------------------------------------------
-section("HEIC (phone) upload -- the format iOS actually produces")
+section("HEIC (phone) upload -- decoded by pillow-heif, not ffmpeg")
 
-sips = shutil.which('sips')
-if sips is None:
-    harness.skip("HEIC upload converts to 800x480",
-                 "no sips to build a HEIC fixture (ffmpeg decodes HEIC but "
-                 "cannot encode it; the Pi has no sips either)")
+# The fixture is a pillow-heif-encoded HEIF, not a sips-built one. The old sips
+# fixture was single-tile and decoded fine through the OLD ffmpeg -map 0:v:0
+# path, so the suite never exercised the real HEIF decode and missed the
+# washed-out/black bug on tiled iPhone HEICs. This fixture forces the pillow-heif
+# branch. HONEST-COVERAGE NOTE: pillow-heif's encoder emits a SINGLE-TILE HEIF,
+# so this proves the decode branch is wired and yields a full-range panel PNG; it
+# does NOT reproduce the iPhone tile grid. The genuinely-tiled regression is only
+# reproduced by running the real photos through convert_image_to_panel_png by
+# hand (see tests/README.md and .agents/tasks/verification.md). Do not read this
+# as tiled coverage.
+import make_fixtures
+
+if not vsmp._HEIF_OK:
+    harness.skip("HEIC upload decoded by pillow-heif to a full-range 800x480 PNG",
+                 "pillow-heif not importable; install pillow-heif to run this "
+                 "(it is a runtime dependency of the web service)")
 else:
-    heic_src_png = harness.WORK_DIR / 'heic_src.png'
-    make_png(heic_src_png, (900, 1200), (120, 120, 200))   # portrait, like a phone
     heic = harness.WORK_DIR / 'phone.heic'
-    conv = subprocess.run([sips, '-s', 'format', 'heic',
-                           str(heic_src_png), '--out', str(heic)],
-                          capture_output=True, text=True, timeout=60)
-    if conv.returncode != 0 or not heic.exists():
-        harness.skip("HEIC upload converts to 800x480",
-                     "sips failed to produce a .heic: {}".format(conv.stderr[-120:]))
+    built = make_fixtures.make_gradient_heif(heic, size=(900, 1200))  # portrait
+    if built is None or not heic.exists():
+        harness.skip("HEIC upload decoded by pillow-heif to a full-range 800x480 PNG",
+                     "pillow-heif could not encode a HEIF fixture")
     else:
-        before = len(published_pngs())
-        data, fname = upload_bytes(heic)
-        resp = client().post('/upload', data={'image': (data, fname)},
-                             content_type='multipart/form-data')
-        check("HEIC upload returns 200", resp.status_code == 200, resp.status_code)
-        after = published_pngs()
-        check("HEIC upload published exactly one new file",
-              len(after) == before + 1, "{} -> {}".format(before, len(after)))
-        if after:
-            sz = Image.open(after[-1]).size
-            check("HEIC result is exactly 800x480", sz == (800, 480), sz)
-            check("HEIC result passes the panel size guard",
-                  panel_guard_accepts(after[-1]), after[-1].name)
+        # Spy on the HEIF detector so we can assert the pillow-heif branch is the
+        # one that ran, not the ffmpeg -map path -- a single-tile fixture could
+        # otherwise pass through ffmpeg and hide a broken branch.
+        orig_is_heif = vsmp._is_heif
+        heif_branch_taken = []
+
+        def spy_is_heif(path):
+            result = orig_is_heif(path)
+            heif_branch_taken.append((str(path), result))
+            return result
+
+        vsmp._is_heif = spy_is_heif
+        try:
+            before = len(published_pngs())
+            data, fname = upload_bytes(heic)
+            resp = client().post('/upload', data={'image': (data, fname)},
+                                 content_type='multipart/form-data')
+            check("HEIC upload returns 200", resp.status_code == 200, resp.status_code)
+            after = published_pngs()
+            check("HEIC upload published exactly one new file",
+                  len(after) == before + 1, "{} -> {}".format(before, len(after)))
+
+            # The HEIF decode branch was actually taken (pillow-heif), not ffmpeg.
+            check("pillow-heif is available (_HEIF_OK)", vsmp._HEIF_OK is True,
+                  vsmp._HEIF_OK)
+            check("the pillow-heif HEIF branch ran (detector saw HEIF=True)",
+                  any(flag for _, flag in heif_branch_taken), heif_branch_taken)
+
+            if after:
+                published = after[-1]
+                img = Image.open(published)
+                img.load()
+                check("HEIC result is exactly 800x480", img.size == (800, 480),
+                      img.size)
+
+                # The webapp publishes into <queue>/<name> after converting into
+                # a '.tmp' temp file, and ffmpeg's image2 muxer stores a '.tmp'
+                # as JPEG(RGB) -- the same as the JPEG/PNG upload paths. The
+                # grayscale guarantee is in the ffmpeg `format=gray` filter, so
+                # the panel sees a neutral image (R==G==B) regardless of the
+                # container's colour type. Assert grayscale CONTENT, not mode.
+                rgb = img.convert('RGB')
+                pixels = list(rgb.getdata())
+                check("HEIC result is grayscale content (every pixel R==G==B)",
+                      all(r == g == b for r, g, b in pixels),
+                      "neutral regardless of JPEG RGB container")
+                check("HEIC result passes the panel size guard",
+                      panel_guard_accepts(published), published.name)
+
+                # Full tonal range: the whole point. A collapsed (all-black or
+                # all-white) decode -- the washed-out bug -- would fail here.
+                # Measured on the grayscale-equivalent of the published image.
+                gray = img.convert('L')
+                hist = gray.histogram()
+                present = [i for i, count in enumerate(hist) if count > 0]
+                lo, hi, distinct = min(present), max(present), len(present)
+                check("HEIC result has a real tonal range (min<50, max>200, "
+                      ">50 distinct grays)",
+                      lo < 50 and hi > 200 and distinct > 50,
+                      "min={} max={} distinct={}".format(lo, hi, distinct))
+        finally:
+            vsmp._is_heif = orig_is_heif
         for p in published_pngs():
             p.unlink()
 

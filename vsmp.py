@@ -33,6 +33,26 @@ from pathlib import Path
 
 from PIL import Image, ImageEnhance
 
+# HEIC/HEIF decode support (the format iPhones produce). ffmpeg on this build
+# cannot assemble the tiled HEVC grid a real iPhone HEIC uses -- `-map 0:v:0`
+# grabs a single tile or an aux plane, which is why those uploads rendered
+# washed-out/gray or black. pillow-heif wraps libheif, which assembles the grid
+# correctly, so HEIC/HEIF is decoded here and everything else still goes through
+# ffmpeg (see convert_image_to_panel_png).
+#
+# The import is guarded so a machine without pillow-heif can still `import vsmp`
+# for the non-HEIF paths; _HEIF_OK records whether the decoder is available. No
+# logging at import time -- mirroring the "configure logging in main(), not at
+# import" rule above -- so this only sets a flag. register_heif_opener() teaches
+# PIL.Image.open() to read HEIF, but detection in convert_image_to_panel_png
+# attempts a real decode rather than trusting the file's extension.
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    _HEIF_OK = True
+except ImportError:
+    _HEIF_OK = False
+
 # NOTE: the e-paper driver is imported lazily inside the play path, NOT here.
 #
 # `from epd import epd7in5_V2_old` pulls in epd/epdconfig.py, whose module body
@@ -705,23 +725,76 @@ def convert_image_to_panel_png(src_path, out_path):
     imports and calls this; it must therefore never import the e-paper driver
     (and it does not -- the driver import is lazy, inside the play path only).
 
-    Phone photos are large and frequently HEIC/HEIF, which Pillow cannot open
-    without an extra plugin. ffmpeg -- already a dependency of the player and
-    the tests -- reads HEIC/JPEG/PNG/WebP uniformly, so it does the decode.
+    Phone photos are large and frequently HEIC/HEIF. ffmpeg on this build does
+    NOT reliably assemble the tiled HEVC grid a real iPhone HEIC uses, so HEIC/
+    HEIF is decoded with pillow-heif (libheif) to a full-resolution temporary
+    PNG first, and the rest of the function runs on that PNG. Every other format
+    (JPEG/PNG/WebP/movie frame) is decoded by ffmpeg directly, exactly as before.
+    Either way the SAME panel_geometry/panel_video_filter ffmpeg scale/letterbox/
+    grayscale pass produces the final image, so the two can never drift.
 
-    The source's own pixel dimensions are probed with ffprobe, then geometry is
-    computed with square pixels (SAR 1:1) and a white letterbox, per the design
-    doc: an uploaded image carries no meaningful SAR, and white bars read as
-    deliberate matting rather than a fault on the panel. One ffmpeg pass writes
-    the 800x480 grayscale PNG that passes display_on_e_ink()'s size guard.
+    The decoded image's own pixel dimensions are probed with ffprobe, then
+    geometry is computed with square pixels (SAR 1:1) and a white letterbox, per
+    the design doc: an uploaded image carries no meaningful SAR, and white bars
+    read as deliberate matting rather than a fault on the panel. One ffmpeg pass
+    writes the 800x480 grayscale PNG that passes display_on_e_ink()'s size guard.
 
-    Validation is "did ffmpeg accept it and produce a non-empty PNG" rather
-    than trusting the uploaded extension or MIME type: on any failure the caller
-    gets an exception and nothing is published to the queue.
+    Validation does not trust the uploaded extension or MIME type: HEIF is
+    detected by actually attempting a libheif decode, and the ffmpeg pass is the
+    final gate. On any failure (pillow-heif raises, or ffmpeg writes nothing) the
+    caller gets an exception and nothing is published to the queue.
     """
     src = Path(src_path)
     out = Path(out_path)
 
+    # HEIC/HEIF branch (route a, IMAGE-QUEUE-DESIGN.md section 4). If the source
+    # decodes as HEIF, assemble it to a full-resolution PNG with pillow-heif and
+    # run the rest of the function on that PNG; ffmpeg does the scale/letterbox/
+    # gray pass it already handles correctly on a plain PNG. The temp file is
+    # removed in the finally block below.
+    heif_tmp = None
+    decode_src = src
+    if _is_heif(src):
+        heif_tmp = out.with_suffix('.heif_src.png')
+        # Let pillow-heif/PIL exceptions propagate: a decode failure must raise
+        # so the caller publishes nothing (the validation contract).
+        Image.open(src).convert('RGB').save(heif_tmp, 'PNG')
+        decode_src = heif_tmp
+
+    try:
+        return _convert_decoded_to_panel_png(decode_src, out)
+    finally:
+        if heif_tmp is not None and heif_tmp.exists():
+            heif_tmp.unlink()
+
+
+def _is_heif(src_path):
+    """True if the source decodes as HEIF/HEIC, by actually attempting a decode.
+
+    Content-based, not extension-based: the upload contract is that we never
+    trust the uploaded extension. pillow_heif.open_heif() succeeds on a genuine
+    HEIF container (including the tiled grid iPhones emit) and raises on anything
+    else, so a clean return means HEIF and any exception means "let ffmpeg try".
+    If pillow-heif is not installed, nothing is HEIF here and ffmpeg handles the
+    file as before.
+    """
+    if not _HEIF_OK:
+        return False
+    try:
+        pillow_heif.open_heif(str(src_path))
+        return True
+    except Exception:
+        return False
+
+
+def _convert_decoded_to_panel_png(src, out):
+    """The ffmpeg scale/letterbox/grayscale pass shared by every format.
+
+    `src` is a file ffmpeg can decode directly (any non-HEIF upload, or the
+    full-resolution PNG pillow-heif wrote for a HEIF upload). Split out of
+    convert_image_to_panel_png so the HEIF and non-HEIF paths run byte-for-byte
+    the same geometry and filter -- the "two can never drift" invariant.
+    """
     raw = run_tool([
         'ffprobe', '-v', 'error', '-select_streams', 'v:0',
         '-show_entries', 'stream=width,height',
@@ -746,6 +819,11 @@ def convert_image_to_panel_png(src_path, out_path):
     geometry = panel_geometry(width, height, sar=Fraction(1), bar_color='white')
     video_filter = panel_video_filter(geometry)
 
+    # HEIF now bypasses ffmpeg decode (handled by pillow-heif in the caller), so
+    # `-map 0:v:0` stays for everything else: it is the correct, intended choice
+    # for real videos / multi-stream inputs (take exactly the first video
+    # stream), and the tiled-HEIC washed-out cause lived in the HEIF decode, not
+    # here. Removing it would risk regressing movie-frame-style inputs.
     run_tool([
         'ffmpeg', '-y', '-nostdin',
         '-i', str(src),

@@ -44,7 +44,11 @@ sudo apt-get install ffmpeg
 
 If you run the web server on a different host from the player, that host needs
 ffmpeg installed regardless. Pillow (already pulled in with the player's
-`requirements.txt`) is used to validate the result.
+`requirements.txt`) is used to validate the result. **pillow-heif** is now a
+runtime dependency of the web service too — it decodes HEIC/HEIF uploads (see
+below) — so it must be in the web venv. Its wheel bundles libheif, so no system
+libheif package is needed on the laptop or the Raspberry Pi; a plain
+`pip install -r requirements.txt` is enough.
 
 ## Try it by hand first
 
@@ -155,7 +159,8 @@ queue fills.
    ```
 
    It binds `0.0.0.0:8080`, so it is reachable from other devices on the same
-   wifi. (ffmpeg and ffprobe must be on `PATH`.)
+   wifi. (ffmpeg and ffprobe must be on `PATH`; pillow-heif must be installed
+   for HEIC/HEIF uploads — it is in `requirements.txt`.)
 
 2. Find the laptop's LAN IP (`ipconfig getifaddr en0` on macOS, `hostname -I` on
    Linux) and, from a phone on the same wifi, browse to
@@ -164,7 +169,9 @@ queue fills.
 3. The page explains what the player is and how the queue works, shows the
    current queue length and estimated wait, and offers a file picker. Pick a
    photo (JPEG, PNG, or HEIC from an iPhone) and submit. The confirmation tells
-   you where in line it landed.
+   you where in line it landed. HEIC/HEIF from an iPhone is decoded by
+   pillow-heif (libheif), on both the laptop and the Pi; every other format is
+   decoded by ffmpeg.
 
 4. Confirm a finished `800x480` grayscale PNG appeared in the queue directory:
 

@@ -39,6 +39,38 @@ def gray_level(n):
     return 10 + n * 4          # 10..246 over 60 frames
 
 
+def make_gradient_heif(path, size=(900, 1200)):
+    """Encode a full-range gradient HEIF fixture with pillow-heif.
+
+    Returns the path on success, or None if pillow-heif is not importable.
+
+    A gradient, not a flat fill: if the HEIF decode grabbed the wrong tile or an
+    aux plane (the bug this guards against) the output's tonal range would
+    collapse, so the test's min/max/distinct-value assertions would catch it.
+
+    Honest-coverage note: pillow-heif's encoder emits a SINGLE-TILE HEIF, so this
+    fixture proves the pillow-heif decode branch in convert_image_to_panel_png is
+    wired and yields a full-range 800x480 panel PNG. It does NOT reproduce the
+    multi-tile grid a real iPhone HEIC uses; that genuinely-tiled regression is
+    only covered by running real iPhone photos through the converter by hand (see
+    tests/README.md). Do not read this fixture as tiled coverage.
+    """
+    try:
+        import pillow_heif
+    except ImportError:
+        return None
+    pillow_heif.register_heif_opener()
+    w, h = size
+    grad = Image.new('L', size)
+    px = grad.load()
+    for x in range(w):
+        level = int(x * 255 / (w - 1))      # 0..255 left-to-right
+        for y in range(h):
+            px[x, y] = level
+    grad.convert('RGB').save(path, format='HEIF')
+    return path
+
+
 def main():
     src = FIXTURES / 'src_frames'
     src.mkdir(parents=True, exist_ok=True)

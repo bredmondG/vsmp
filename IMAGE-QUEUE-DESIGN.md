@@ -153,9 +153,22 @@ for the same name. No lock files, no database.
 
 ## 4. Image conversion (handles phone uploads)
 
-Phone photos are large and often HEIC/HEIF, which Pillow cannot open without an
-extra plugin. Rather than add an image library, **reuse ffmpeg**, which the
-player and tests already depend on and which reads HEIC/JPEG/PNG/WebP uniformly.
+Phone photos are large and often HEIC/HEIF. For JPEG/PNG/WebP the decode is done
+by **ffmpeg**, which the player and tests already depend on.
+
+HEIC/HEIF is the exception and is decoded by **pillow-heif** (libheif), not
+ffmpeg. The earlier assumption that "ffmpeg reads HEIC uniformly" was wrong: a
+real iPhone HEIC stores its main image as a grid of HEVC tiles plus auxiliary
+planes, and the ffmpeg build here does not assemble that grid — `-map 0:v:0`
+grabbed a single tile or an aux plane, so those uploads rendered washed-out/gray
+or black on the panel. pillow-heif/libheif assembles the grid correctly, so the
+HEIF branch decodes the upload to a full-resolution PNG first and then hands that
+PNG to the SAME ffmpeg scale/letterbox/grayscale pass (below). pillow-heif is a
+runtime dependency of the web service; its wheel bundles libheif (no system
+libheif package needed on the dev laptop or the Raspberry Pi).
+
+HEIF is detected by actually attempting a libheif decode (content-based), never
+by trusting the uploaded extension.
 
 The conversion applies the **same scale / letterbox / grayscale filter** that
 `extract_frame()` already uses in `vsmp.py`, producing an 800x480 (`PANEL_W` x
@@ -175,9 +188,10 @@ from the image's own dimensions with square pixels (SAR 1:1), fitting inside
 800x480 and letterboxing with white. The geometry maths in `panel_geometry()`
 can be reused directly by passing `sar=Fraction(1)`.
 
-Validation is "does ffmpeg accept it and produce a non-empty PNG" rather than
-trusting the uploaded extension or MIME type. A conversion failure → reject the
-upload with a clear error, write nothing to `queue/`.
+Validation is "did the decoder (pillow-heif for HEIF, ffmpeg otherwise) accept
+it and produce a non-empty PNG" rather than trusting the uploaded extension or
+MIME type. Any decode failure — pillow-heif raising, or ffmpeg writing nothing —
+rejects the upload with a clear error and writes nothing to `queue/`.
 
 ---
 
@@ -358,8 +372,9 @@ panel. The design makes that clean because the webapp never touches hardware.
 - Upload from several tabs/phones at once to exercise concurrency: every file
   must land with a unique name and no half-written file may ever appear in
   `queue/`.
-- ffmpeg is the only runtime dependency of conversion and is already present on
-  this laptop, so conversion is real, not stubbed.
+- ffmpeg (JPEG/PNG/WebP decode + the shared scale/letterbox/gray pass) and
+  pillow-heif (HEIC/HEIF decode) are the runtime dependencies of conversion;
+  both are present on this laptop, so conversion is real, not stubbed.
 
 ### Player queue-drain logic — testable against the existing EPD stub
 

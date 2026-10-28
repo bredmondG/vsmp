@@ -93,6 +93,28 @@ and turns one into a clear assertion failure; use `start_player()` for anything
 meant to actually play, which waits for the first frame and then sends SIGINT.
 This has caught us once already.
 
+## The HEIC fixture and what it does and does not prove
+
+`test_webapp` builds its HEIC fixture with `pillow-heif`
+(`make_fixtures.make_gradient_heif`), not macOS `sips`. The reason is a bug this
+suite once missed: the old sips fixture was a **single-tile** HEIC that decoded
+fine through the old ffmpeg `-map 0:v:0` path, so the suite never exercised the
+real HEIF decode and did not catch that real **tiled** iPhone HEICs came out
+washed-out or black. HEIC/HEIF is now decoded by pillow-heif (libheif); ffmpeg
+only does the shared scale/letterbox/gray pass.
+
+The fixture is a full-range gradient so a wrong-tile/aux-plane decode would show
+a collapsed tonal range, and the test asserts the pillow-heif branch actually
+ran (spying on `vsmp._is_heif`) plus a real tonal range on the output. But
+pillow-heif's encoder emits a **single-tile** HEIF, so this fixture proves the
+decode branch is wired and yields a full-range 800x480 panel PNG — it does **not**
+reproduce the multi-tile grid a real iPhone HEIC uses. That genuinely-tiled
+regression is only reproduced by running real iPhone photos through
+`vsmp.convert_image_to_panel_png` by hand; the evidence from doing so is recorded
+in `.agents/tasks/verification.md`. The real photos are personal and are not
+committed. If `pillow-heif` is not importable the HEIC checks `skip` with a clear
+reason rather than passing silently.
+
 ## What the suite does not cover
 
 - **Real hardware.** No Pi, no panel, no SPI. The stub cannot tell you whether
