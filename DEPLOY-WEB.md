@@ -14,7 +14,9 @@ player as a separate service.
 | Route          | Purpose                                                         |
 |----------------|-----------------------------------------------------------------|
 | `/`            | Rendered status page, auto-refreshing (default every 30s).      |
+| `/upload`      | Phone-friendly page to add an image to the queue (GET = form, POST = upload). |
 | `/status.json` | The derived summary as JSON. Good base for scripts or a widget. |
+| `/queue.json`  | The queue length, ordered names, and estimated wait as JSON.    |
 | `/healthz`     | Liveness of the server itself, independent of `state.json`.     |
 
 ## Install the dependencies
@@ -29,7 +31,20 @@ cd ~/vsmp
 ```
 
 That adds Flask, its runtime deps, and gunicorn (the production WSGI server the
-unit runs). Nothing here is needed by the player itself.
+unit runs).
+
+**ffmpeg is now a dependency of the web server too.** `POST /upload` shells out
+to `ffmpeg` (and `ffprobe`) to convert each uploaded photo into an 800x480
+grayscale PNG in-request, the same way the player converts movie frames. Both
+must be on the `PATH` of the web process:
+
+```
+sudo apt-get install ffmpeg
+```
+
+If you run the web server on a different host from the player, that host needs
+ffmpeg installed regardless. Pillow (already pulled in with the player's
+`requirements.txt`) is used to validate the result.
 
 ## Try it by hand first
 
@@ -79,11 +94,91 @@ All optional — the unit ships working defaults. Set these in
 `/etc/default/vsmp-web` (see `systemd/vsmp-web.env.example`) and
 `sudo systemctl restart vsmp-web`:
 
-| Variable           | Default          | Meaning                                            |
-|--------------------|------------------|----------------------------------------------------|
-| `VSMP_WEB_BIND`    | `0.0.0.0:8080`   | gunicorn listen address. `127.0.0.1:8080` = local. |
-| `VSMP_STATE`       | `state.json`     | State file to read (relative to the repo).         |
-| `VSMP_WEB_REFRESH` | `30`             | Page auto-refresh in seconds; `0` disables it.     |
+| Variable             | Default          | Meaning                                                      |
+|----------------------|------------------|--------------------------------------------------------------|
+| `VSMP_WEB_BIND`      | `0.0.0.0:8080`   | gunicorn listen address. `127.0.0.1:8080` = local.           |
+| `VSMP_STATE`         | `state.json`     | State file to read (relative to the repo).                   |
+| `VSMP_WEB_REFRESH`   | `30`             | Page auto-refresh in seconds; `0` disables it.               |
+| `VSMP_QUEUE`         | `queue`          | Shared upload queue directory. MUST match the player's.      |
+| `VSMP_ARCHIVE_DIR`   | _(unset)_        | If set, the player keeps shown images here instead of deleting. |
+| `VSMP_ARCHIVE_MAX`   | `50`             | Cap on archived images, most-recent kept.                    |
+| `VSMP_UPLOAD_SECRET` | _(unset)_        | If set, `POST /upload` requires this shared secret. Off = open on LAN. |
+
+## The shared upload queue
+
+The `/upload` page lets anyone on the LAN add an image to the player. An upload
+is converted to an 800x480 grayscale PNG and dropped into a **queue directory**;
+the player drains that directory one image per 150s tick, shows each for a
+single tick without interrupting the current image, and returns to the movie
+when the queue is empty.
+
+For this to work the player and the web server must point at **one and the same
+directory**:
+
+- Web server: `VSMP_QUEUE` in `/etc/default/vsmp-web`.
+- Player: `VSMP_QUEUE` in `/etc/default/vsmp`, or `--queue-dir` in `VSMP_ARGS`.
+
+Set both to the same absolute path (the examples use `/home/pi/vsmp/queue`). If
+they disagree, uploads land where the player never looks and are silently never
+shown. The directory is created on demand and holds the published `*.png` files
+plus two dotfile subdirs it manages itself: `.incoming/` (mid-conversion temp
+files) and `.showing/` (an image the player has claimed for the current tick).
+
+**The web service needs write access to this directory.** It is the only thing
+the web process writes. The unit grants it with `ReadWritePaths=<queue dir>` in
+`systemd/vsmp-web.service` (which replaced the old purely-`ReadOnlyPaths`
+hardening). Point that line at the same path as `VSMP_QUEUE`. The player only
+reads from and claims out of the queue, so no extra permission is needed there.
+
+By default an image is **deleted** once its tick is over. Set `VSMP_ARCHIVE_DIR`
+(read by the player) to keep a copy instead; the archive is pruned to the
+most-recent `VSMP_ARCHIVE_MAX` files (default 50).
+
+### Upload size cap
+
+`webapp.py` sets `MAX_CONTENT_LENGTH` to 16 MB. A larger upload — an oversized
+phone photo, say — is rejected with a clean `413` response instead of being read
+into memory. A full-resolution phone JPEG or HEIC is comfortably under the cap;
+raw or multi-shot files may not be.
+
+## Run the webapp locally and upload from your phone
+
+You can exercise the whole upload path on a laptop with no Pi and no e-ink panel
+attached — conversion is real ffmpeg writing a PNG to disk, which needs no
+hardware. This is the quickest way to see the `/upload` page and confirm the
+queue fills.
+
+1. On the laptop, in the repo with the venv active, start the built-in server:
+
+   ```
+   python3 webapp.py
+   ```
+
+   It binds `0.0.0.0:8080`, so it is reachable from other devices on the same
+   wifi. (ffmpeg and ffprobe must be on `PATH`.)
+
+2. Find the laptop's LAN IP (`ipconfig getifaddr en0` on macOS, `hostname -I` on
+   Linux) and, from a phone on the same wifi, browse to
+   `http://<laptop-LAN-ip>:8080/upload`.
+
+3. The page explains what the player is and how the queue works, shows the
+   current queue length and estimated wait, and offers a file picker. Pick a
+   photo (JPEG, PNG, or HEIC from an iPhone) and submit. The confirmation tells
+   you where in line it landed.
+
+4. Confirm a finished `800x480` grayscale PNG appeared in the queue directory:
+
+   ```
+   ls -la queue/
+   python3 -c "from PIL import Image; im=Image.open('queue/<name>.png'); print(im.size, im.mode)"
+   ```
+
+   You should see `(800, 480) L`. The temp subdirs `.incoming/` and `.showing/`
+   stay empty between uploads. Because there is no panel here, nothing is
+   displayed — the player on the Pi is what drains the queue onto the screen.
+
+`Ctrl-C` to stop. As with the status page, the built-in server is for this
+hand-test only; production uses gunicorn via the unit.
 
 ## A note on access
 
@@ -103,6 +198,7 @@ deliberately minimal so there is room to grow:
 - **New endpoints** (a history graph, a log tail, a JSON feed for a desk
   widget): add routes to `webapp.py`. `/status.json` is already there as a
   starting point.
-- **If a route needs to write** (a cache, an uploaded movie): relax the
-  hardening in the unit — swap `ReadOnlyPaths` for `ReadWritePaths` on the
-  specific path — since the service currently runs read-only by design.
+- **If a route needs to write** (a cache, say): grant it the narrowest possible
+  write access in the unit, the way `/upload` already does — the queue directory
+  is listed under `ReadWritePaths` while the repo stays under `ReadOnlyPaths`.
+  Add the specific path, do not open up the whole repo.
