@@ -813,10 +813,13 @@ def _convert_decoded_to_panel_png(src, out):
     except (KeyError, TypeError, ValueError):
         raise RuntimeError("Could not read image dimensions from {}".format(src))
 
-    # Square pixels and a white letterbox (design doc section 4). panel_geometry
-    # resolves the bar colour to the ffmpeg token carried on the dict, so the
-    # same panel_video_filter() used for movie frames applies unchanged.
-    geometry = panel_geometry(width, height, sar=Fraction(1), bar_color='white')
+    # Square pixels and a letterbox in the default bar colour (DEFAULT_BAR_COLOR,
+    # currently 'black') so queued images match the movie's own letterboxing
+    # rather than standing out with white bars. panel_geometry resolves the bar
+    # colour to the ffmpeg token carried on the dict, so the same
+    # panel_video_filter() used for movie frames applies unchanged.
+    geometry = panel_geometry(width, height, sar=Fraction(1),
+                              bar_color=DEFAULT_BAR_COLOR)
     video_filter = panel_video_filter(geometry)
 
     # HEIF now bypasses ffmpeg decode (handled by pillow-heif in the caller), so
