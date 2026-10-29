@@ -79,7 +79,7 @@ Environment=PYTHONUNBUFFERED=1
 # This MUST match the player's VSMP_QUEUE / --queue-dir (see
 # systemd/vsmp.env.example) and MUST be listed in ReadWritePaths below. Override
 # it in /etc/default/vsmp-web.
-Environment=VSMP_QUEUE=/home/pi/vsmp/queue
+Environment=VSMP_QUEUE=/home/rpi5/development/vsmp/queue
 
 # ---- RUNTIME DEPENDENCY: ffmpeg --------------------------------------------
 # ffmpeg is now a RUNTIME dependency of THIS web service, not only the player.
@@ -106,7 +106,7 @@ PrivateTmp=true
 # The repo dir must stay readable so webapp.py can `import vsmp` and read
 # state.json. Point this at your real repo path -- the same directory as
 # WorkingDirectory above.
-ReadOnlyPaths=/home/pi/vsmp
+ReadOnlyPaths=/home/rpi5/development/vsmp
 # The ONE writable path: the image-upload queue directory. /upload converts an
 # upload and atomically publishes an 800x480 PNG here (via the queue's own
 # .incoming/ temp subdir), and this is the only thing the web service writes.
@@ -114,7 +114,7 @@ ReadOnlyPaths=/home/pi/vsmp
 # --queue-dir / VSMP_QUEUE (systemd/vsmp.env.example). If the queue lives inside
 # the repo, this ReadWritePaths entry overrides the ReadOnlyPaths above for that
 # subdirectory; if it lives elsewhere, both paths are listed independently.
-ReadWritePaths=/home/pi/vsmp/queue
+ReadWritePaths=/home/rpi5/development/vsmp/queue
 # ---------------------------------------------------------------------------
 
 StandardOutput=journal

@@ -1,54 +1,72 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+{% extends 'base.html' %}
+
+{% block head %}
   {% if refresh and summary %}<meta http-equiv="refresh" content="{{ refresh }}">{% endif %}
-  <title>vsmp status{% if summary and summary.movie %} — {{ summary.movie }}{% endif %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
-  <main class="card">
-    <h1>Very Slow Movie Player</h1>
+{% endblock %}
 
-    {% if not summary %}
-      <p class="muted">No state yet — the player has not written a frame.</p>
-      <p class="muted small">Looking for <code>{{ state_path }}</code>.</p>
+{% block title %}{{ summary.movie if summary and summary.movie else 'Status' }}{% endblock %}
+
+{% block content %}
+  <h1>Very Slow Movie Player</h1>
+
+  {% if not summary %}
+    <p class="muted">No state yet — the player has not written a frame.</p>
+    <p class="muted small">Looking for <code>{{ state_path }}</code>.</p>
+  {% else %}
+    <p class="movie">{{ summary.movie or 'unknown movie' }}</p>
+
+    <div class="bar" role="progressbar"
+         aria-valuenow="{{ '%.1f'|format(summary.percent) }}"
+         aria-valuemin="0" aria-valuemax="100"
+         aria-label="playback progress">
+      <div class="bar-fill" style="width: {{ '%.3f'|format(summary.percent) }}%"></div>
+    </div>
+    <p class="percent">{{ '%.3f'|format(summary.percent) }}%
+      <span class="state state-{{ summary.state }}">{{ summary.state }}</span>
+    </p>
+
+    {# --- what a passer-by wants to know ---------------------------------- #}
+    <dl class="facts">
+      <dt>frame</dt><dd>{{ summary.frame }} of {{ summary.total_frames }}</dd>
+      <dt>timecode</dt><dd>{{ summary.timecode }} of {{ summary.duration }}</dd>
+      <dt>next frame</dt><dd>{{ summary.next_frame_local|clock }}</dd>
+      {% if summary.remaining_frames is not none %}
+      <dt>remaining</dt>
+      <dd>about {{ '%.1f'|format(summary.remaining_days) }} days
+          ({{ summary.remaining_frames }} frames)</dd>
+      {% endif %}
+    </dl>
+  {% endif %}
+
+  {# --- the queue, so the status page shows when a picture is waiting ----- #}
+  <p class="queue-line">
+    {% if queue.length == 0 %}
+      No pictures waiting.
     {% else %}
-      <p class="movie">{{ summary.movie or 'unknown movie' }}</p>
+      {{ queue.length }} picture{{ 's' if queue.length != 1 else '' }} waiting{% if queue.entries[0].shows_epoch %} · next one shows at {{ queue.entries[0].shows_epoch|clock }}{% endif %}.
+    {% endif %}
+  </p>
 
-      <div class="bar" role="progressbar"
-           aria-valuenow="{{ '%.1f'|format(summary.percent) }}"
-           aria-valuemin="0" aria-valuemax="100"
-           aria-label="playback progress">
-        <div class="bar-fill" style="width: {{ '%.3f'|format(summary.percent) }}%"></div>
-      </div>
-      <p class="percent">{{ '%.3f'|format(summary.percent) }}%
-        <span class="state state-{{ summary.state }}">{{ summary.state }}</span>
-      </p>
+  <p><a class="button" href="{{ url_for('upload') }}">Add an image</a></p>
 
+  {# --- operator diagnostics, out of the way for casual visitors --------- #}
+  {% if summary %}
+    <details class="small">
+      <summary>Player details</summary>
       <dl class="facts">
-        <dt>frame</dt><dd>{{ summary.frame }} of {{ summary.total_frames }}</dd>
-        <dt>timecode</dt><dd>{{ summary.timecode }} of {{ summary.duration }}</dd>
-        <dt>last frame</dt><dd>{{ summary.last_frame_local }}</dd>
-        <dt>next frame</dt><dd>{{ summary.next_frame_local }}</dd>
-        <dt>this run</dt><dd>{{ summary.frames_this_run }} frames since {{ summary.run_started_local or 'unknown' }}</dd>
+        <dt>last frame</dt><dd>{{ summary.last_frame_local|clock }}</dd>
+        <dt>this run</dt><dd>{{ summary.frames_this_run }} frames since {{ summary.run_started_local|clock if summary.run_started_local else 'unknown' }}</dd>
         <dt>last frame cost</dt><dd>extract {{ summary.last_extract_s }}s, display {{ summary.last_display_s }}s</dd>
         <dt>errors / anomalies</dt><dd>{{ summary.errors }} / {{ summary.anomalies }}</dd>
-        {% if summary.remaining_frames is not none %}
-        <dt>remaining</dt>
-        <dd>{{ summary.remaining_frames }} frames, about
-            {{ '%.1f'|format(summary.remaining_days) }} days at
-            {{ summary.frames_per_hour }} frames/hour</dd>
-        {% endif %}
+        <dt>images shown</dt><dd>{{ summary.images_shown }}</dd>
+        <dt>cadence</dt><dd>{{ summary.frames_per_hour }} frames/hour</dd>
       </dl>
-    {% endif %}
+    </details>
+  {% endif %}
+{% endblock %}
 
-    <footer class="muted small">
-      {% if refresh and summary %}auto-refreshing every {{ refresh }}s ·{% endif %}
-      <a href="{{ url_for('upload') }}">add an image</a> ·
-      <a href="{{ url_for('status_json') }}">status.json</a>
-    </footer>
-  </main>
-</body>
-</html>
+{% block footer %}
+  {% if refresh and summary %}auto-refreshing every {{ refresh }}s ·{% endif %}
+  <a href="{{ url_for('status_json') }}">status.json</a> ·
+  <a href="{{ url_for('queue_json') }}">queue.json</a>
+{% endblock %}

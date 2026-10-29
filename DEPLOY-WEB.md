@@ -106,7 +106,8 @@ All optional — the unit ships working defaults. Set these in
 | `VSMP_QUEUE`         | `queue`          | Shared upload queue directory. MUST match the player's.      |
 | `VSMP_ARCHIVE_DIR`   | _(unset)_        | If set, the player keeps shown images here instead of deleting. |
 | `VSMP_ARCHIVE_MAX`   | `50`             | Cap on archived images, most-recent kept.                    |
-| `VSMP_UPLOAD_SECRET` | _(unset)_        | If set, `POST /upload` requires this shared secret. Off = open on LAN. |
+| `VSMP_QUEUE_MAX`     | `30`             | Most images allowed to wait at once (30 = 75 min of panel time). `0` = no cap. |
+| `VSMP_UPLOAD_SECRET` | _(unset)_        | If set, `POST /upload` requires this shared secret (the page shows a password box). Status pages stay open. Off = open on LAN. |
 
 ## The shared upload queue
 
@@ -141,9 +142,20 @@ most-recent `VSMP_ARCHIVE_MAX` files (default 50).
 ### Upload size cap
 
 `webapp.py` sets `MAX_CONTENT_LENGTH` to 16 MB. A larger upload — an oversized
-phone photo, say — is rejected with a clean `413` response instead of being read
-into memory. A full-resolution phone JPEG or HEIC is comfortably under the cap;
-raw or multi-shot files may not be.
+phone photo, say — is rejected with a `413` that re-renders the upload page with
+a readable message, instead of being read into memory. The page also checks the
+size in the browser before sending. A full-resolution phone JPEG or HEIC is
+comfortably under the cap; raw or multi-shot files may not be.
+
+### Queue cap and the confirmation page
+
+When `VSMP_QUEUE_MAX` images are already waiting, the form is replaced by a
+"queue is full" note and `POST /upload` answers `429`. A successful upload
+redirects (`303`) to `/upload?added=<name>`, so reloading the confirmation never
+uploads the photo twice. That page shows the place in line, the estimated show
+time (taken from the player's `next_frame_local`; it falls back to a minutes
+estimate when the player is not running), and a preview of the converted image
+served from `/queue/<name>` while it is still waiting.
 
 ## Run the webapp locally and upload from your phone
 

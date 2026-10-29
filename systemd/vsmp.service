@@ -64,9 +64,9 @@ Type=simple
 # There is no need to "activate" the venv. Invoking its interpreter directly is
 # equivalent and is the correct approach under systemd, which has no shell to
 # run an activate script in.
-User=pi
-WorkingDirectory=/home/pi/vsmp
-ExecStart=/home/pi/venv/bin/python vsmp.py ${VSMP_MOVIE} $VSMP_ARGS
+User=rpi5
+WorkingDirectory=/home/rpi5/development/vsmp
+ExecStart=/home/rpi5/development/venv_vsmp/bin/python vsmp.py ${VSMP_MOVIE} $VSMP_ARGS
 # ---------------------------------------------------------------------------
 
 # Note the two different expansion forms above, which is not a typo:

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% block head %}{% endblock %}
+  <title>{% block title %}{% endblock %} — Very Slow Movie Player</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="card">
+    {% block content %}{% endblock %}
+
+    <footer class="muted small">
+      {% block footer %}{% endblock %}
+    </footer>
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

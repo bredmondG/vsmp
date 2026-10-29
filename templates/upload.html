@@ -1,78 +1,146 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Add an image — Very Slow Movie Player</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
-  <main class="card">
-    <h1>Add an image</h1>
+{% extends 'base.html' %}
 
-    {# --- what the VSMP is ------------------------------------------------ #}
-    <p class="muted small">
-      This is a <strong>very slow movie player</strong>. It shows one frame of a
-      film on an e-paper panel every 150 seconds — 24 frames an hour. It is made
-      to be glanced at, like a picture on the wall that barely moves.
-    </p>
+{% block title %}Add an image{% endblock %}
 
-    {# --- what happens to an uploaded image ------------------------------- #}
-    <p class="muted small">
-      Your picture joins a first-in, first-out queue. When its turn comes it is
-      shown for one 150-second slot, then the film carries on where it paused —
-      an upload never interrupts the image already on screen. Pictures are
-      converted to grayscale and scaled to fit the panel, with white bars if the
-      shape does not match. When the queue is empty, the movie just keeps
+{% block content %}
+  <h1>Add an image</h1>
+
+  <p class="lede">
+    Put your picture on the very slow movie player. It gets one
+    {{ frame_interval_s }}-second turn on the e-paper panel, then the film
+    carries on.
+  </p>
+
+  <details class="small muted">
+    <summary>How it works</summary>
+    <p>
+      The player shows one frame of a film every {{ frame_interval_s }} seconds,
+      {{ frames_per_hour }} frames an hour. Uploaded pictures wait in a
+      first-in, first-out queue. When a picture's turn comes it is shown for one
+      slot, then the film carries on where it paused. An upload never interrupts
+      the image already on screen, and when the queue is empty the movie keeps
       playing.
     </p>
+    <p>
+      Pictures are converted to grayscale and scaled to fit the panel, with bars
+      added if the shape does not match.
+    </p>
+  </details>
 
-    {% if error %}
-      <p class="percent state state-finished" role="alert">{{ error }}</p>
-    {% elif landed_position is not none %}
-      <p class="percent">
-        Added
-        <span class="state state-playing">{{ landed_position }}{{
-          'st' if landed_position % 10 == 1 and landed_position != 11 else
-          'nd' if landed_position % 10 == 2 and landed_position != 12 else
-          'rd' if landed_position % 10 == 3 and landed_position != 13 else
-          'th' }} in line</span>
-      </p>
-    {% endif %}
+  {# --- result of the last action ----------------------------------------- #}
+  {% if error %}
+    <p class="banner banner-error" role="alert">{{ error }}</p>
+  {% elif added %}
+    <div class="banner banner-ok" role="status">
+      {% if added_item %}
+        <p>
+          Added — <strong>{{ added_item.position|ordinal }} in line</strong>{% if added_item.shows_epoch %},
+          shows at about {{ added_item.shows_epoch|clock }}{% endif %}.
+        </p>
+        <figure class="preview">
+          <img src="{{ url_for('queue_image', name=added) }}" width="800" height="480"
+               alt="Your picture, converted to grayscale as it will appear on the panel">
+          <figcaption class="small muted">How it will look on the panel</figcaption>
+        </figure>
+      {% else %}
+        <p>Your picture has had its turn on the panel.</p>
+      {% endif %}
+    </div>
+  {% endif %}
 
-    {# --- the queue length + estimated wait ------------------------------- #}
-    {% if queue.length == 0 %}
-      <p class="percent">Queue is empty — the movie is playing</p>
-    {% else %}
-      <dl class="facts">
-        <dt>in the queue</dt>
-        <dd>{{ queue.length }} image{{ 's' if queue.length != 1 else '' }}</dd>
-        <dt>estimated wait</dt>
-        <dd>about {{ '%.1f'|format(queue.wait_minutes) }} min</dd>
-      </dl>
-    {% endif %}
+  {# --- the queue length + when a new picture would show ------------------- #}
+  {% if queue.length == 0 %}
+    <p class="percent">Queue is empty — the movie is playing{% if queue.next_new_epoch %}.
+      A picture added now shows {{ queue.next_new_epoch|until }}{% endif %}.</p>
+  {% else %}
+    <dl class="facts">
+      <dt>in the queue</dt>
+      <dd>{{ queue.length }} picture{{ 's' if queue.length != 1 else '' }}</dd>
+      <dt>add one now</dt>
+      {% if queue.next_new_epoch %}
+        <dd>shows at about {{ queue.next_new_epoch|clock }} ({{ queue.next_new_epoch|until }})</dd>
+      {% else %}
+        <dd>shows in about {{ '%.0f'|format(queue.wait_minutes) }} min</dd>
+      {% endif %}
+    </dl>
+  {% endif %}
 
-    {# --- the upload form -------------------------------------------------- #}
+  {# --- the upload form ---------------------------------------------------- #}
+  {% if queue_full %}
+    <p class="banner banner-error" role="status">
+      The queue is full ({{ queue_max }} pictures). Please try again in a few
+      minutes.
+    </p>
+  {% else %}
     <form class="upload" method="post" action="{{ url_for('upload') }}"
-          enctype="multipart/form-data">
-      <input type="file" name="image" accept="image/*" required>
+          enctype="multipart/form-data" data-max-bytes="{{ max_upload_bytes }}">
+      <label for="image">Choose a photo</label>
+      <input id="image" type="file" name="image" accept="image/*" required
+             aria-describedby="image-hint">
+      {% if secret_required %}
+        <label for="secret">Upload password</label>
+        <input id="secret" type="password" name="secret" required
+               autocomplete="current-password">
+      {% endif %}
       <button type="submit">Add to the queue</button>
+      <p id="image-hint" class="small muted hint">
+        Up to {{ max_upload_mb }} MB. JPEG, PNG, HEIC and WebP all work.
+      </p>
     </form>
+  {% endif %}
 
-    {# --- the current queue, so a visitor sees roughly where they land ---- #}
-    {% if queue.length > 0 %}
-      <p class="muted small">Waiting now, oldest first:</p>
-      <ol class="queue-list small muted">
-        {% for name in queue.names %}
-          <li>{{ loop.index }}</li>
-        {% endfor %}
-      </ol>
-    {% endif %}
+  {# --- who is waiting, so a visitor sees roughly where they land --------- #}
+  {% if queue.length > 0 %}
+    <p class="muted small">Waiting now, oldest first:</p>
+    <ol class="queue-list small">
+      {% for item in queue.entries %}
+        <li{% if item.name == added %} class="yours"{% endif %}>
+          added {{ item.added_epoch|ago }}{% if item.shows_epoch %} · shows ~{{ item.shows_epoch|clock }}{% endif %}{% if item.name == added %} · <strong>yours</strong>{% endif %}
+        </li>
+      {% endfor %}
+    </ol>
+  {% endif %}
+{% endblock %}
 
-    <footer class="muted small">
-      <a href="{{ url_for('index') }}">← back to status</a> ·
-      <a href="{{ url_for('queue_json') }}">queue.json</a>
-    </footer>
-  </main>
-</body>
-</html>
+{% block footer %}
+  <a href="{{ url_for('index') }}">← back to status</a>
+{% endblock %}
+
+{% block scripts %}
+  {# Progressive enhancement only: the form works the same with JS off. #}
+  <script>
+    (function () {
+      var form = document.querySelector('form.upload');
+      if (!form) return;
+      var input = form.querySelector('input[type="file"]');
+      var button = form.querySelector('button[type="submit"]');
+      var label = button.textContent;
+      var maxBytes = parseInt(form.getAttribute('data-max-bytes'), 10);
+
+      // Catch an oversized photo before spending the upload on it.
+      input.addEventListener('change', function () {
+        var file = input.files && input.files[0];
+        if (file && maxBytes && file.size > maxBytes) {
+          input.setCustomValidity('That photo is ' +
+            (file.size / 1048576).toFixed(1) + ' MB; the limit is ' +
+            Math.floor(maxBytes / 1048576) + ' MB.');
+          input.reportValidity();
+        } else {
+          input.setCustomValidity('');
+        }
+      });
+
+      // Conversion takes a few seconds on the Pi; show that something is happening.
+      form.addEventListener('submit', function () {
+        button.disabled = true;
+        button.textContent = 'Converting…';
+      });
+
+      // Coming back via the back button restores a cached page; re-enable it.
+      window.addEventListener('pageshow', function () {
+        button.disabled = false;
+        button.textContent = label;
+      });
+    })();
+  </script>
+{% endblock %}

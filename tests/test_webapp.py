@@ -110,7 +110,12 @@ for label, src in (('JPEG', src_jpg), ('PNG', src_png)):
     data, fname = upload_bytes(src)
     resp = client().post('/upload', data={'image': (data, fname)},
                           content_type='multipart/form-data')
-    check("{} upload returns 200".format(label), resp.status_code == 200,
+    # Post/Redirect/Get: a reload of the confirmation must not re-upload.
+    check("{} upload redirects (303) to the confirmation".format(label),
+          resp.status_code == 303 and '/upload?added=' in resp.headers.get('Location', ''),
+          (resp.status_code, resp.headers.get('Location')))
+    resp = client().get(resp.headers['Location'])
+    check("{} confirmation page returns 200".format(label), resp.status_code == 200,
           resp.status_code)
     rbody = resp.get_data(as_text=True)
     check("{} upload confirms a landed position".format(label),
@@ -176,7 +181,8 @@ else:
             data, fname = upload_bytes(heic)
             resp = client().post('/upload', data={'image': (data, fname)},
                                  content_type='multipart/form-data')
-            check("HEIC upload returns 200", resp.status_code == 200, resp.status_code)
+            check("HEIC upload succeeds (303 to the confirmation)",
+                  resp.status_code == 303, resp.status_code)
             after = published_pngs()
             check("HEIC upload published exactly one new file",
                   len(after) == before + 1, "{} -> {}".format(before, len(after)))
@@ -305,7 +311,7 @@ def do_upload(src):
         data, fname = upload_bytes(src)
         resp = client().post('/upload', data={'image': (data, fname)},
                              content_type='multipart/form-data')
-        if resp.status_code != 200:
+        if resp.status_code != 303:
             errors.append((src.name, resp.status_code))
     except Exception as e:
         errors.append((src.name, repr(e)))

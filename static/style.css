@@ -6,6 +6,7 @@
   --accent: #6ea8fe;
   --bar-bg: #2b2e37;
   --ok: #4ec9a5;
+  --error: #ff7b7b;
 }
 
 * { box-sizing: border-box; }
@@ -110,9 +111,23 @@ code { background: var(--bar-bg); padding: 0.1rem 0.35rem; border-radius: 5px; }
   margin: 1.25rem 0;
 }
 
+.upload label { flex: 1 1 100%; font-weight: 600; }
 .upload input[type="file"] { color: var(--muted); flex: 1 1 12rem; }
+.upload input[type="password"] {
+  flex: 1 1 12rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--bar-bg);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+}
+.upload .hint { flex: 1 1 100%; margin: 0; }
 
-.upload button {
+/* One button style, shared by the form button and link-buttons. */
+.upload button,
+.button {
+  display: inline-block;
   padding: 0.5rem 1.1rem;
   border: 0;
   border-radius: 999px;
@@ -120,7 +135,42 @@ code { background: var(--bar-bg); padding: 0.1rem 0.35rem; border-radius: 5px; }
   color: var(--bg);
   font: inherit;
   font-weight: 600;
+  text-decoration: none;
   cursor: pointer;
 }
 
-.queue-list { margin: 0.25rem 0 0; padding-left: 1.5rem; }
+.upload button:disabled { opacity: 0.6; cursor: progress; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.lede { margin: 0.5rem 0 0.75rem; }
+
+details { margin: 0.75rem 0 1rem; }
+details summary { cursor: pointer; color: var(--accent); }
+details .facts { margin-top: 0.75rem; }
+
+.banner {
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+}
+.banner p { margin: 0; }
+.banner-ok { background: rgba(78, 201, 165, 0.12); }
+.banner-ok strong { color: var(--ok); }
+.banner-error { background: rgba(255, 123, 123, 0.12); color: var(--error); }
+
+.preview { margin: 0.75rem 0 0; }
+.preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+  background: var(--bar-bg);
+}
+.preview figcaption { margin-top: 0.35rem; }
+
+.queue-line { margin: 1.25rem 0 0.75rem; }
+
+.queue-list { margin: 0.25rem 0 0; padding-left: 1.5rem; color: var(--muted); }
+.queue-list .yours { color: var(--ink); }
+.queue-list .yours strong { color: var(--ok); }
